@@ -16,26 +16,15 @@ class RelayClient extends EventEmitter {
     this._destroyed = false;
 
     // 监听 PTY 事件，转发到中继服务器
-    this.sessionManager.on('output', ({ sessionId, data }) => {
-      this._send({ type: 'output', sessionId, data });
-    });
+    this._onOutput = ({ sessionId, data }) => this._send({ type: 'output', sessionId, data });
+    this._onCreated = (session) => this._send({ type: 'session_created', sessionId: session.id, cwd: session.cwd, shell: session.shell });
+    this._onClosed = ({ sessionId }) => this._send({ type: 'session_closed', sessionId });
+    this._onExit = ({ sessionId, exitCode }) => this._send({ type: 'session_exit', sessionId, exitCode });
 
-    this.sessionManager.on('created', (session) => {
-      this._send({
-        type: 'session_created',
-        sessionId: session.id,
-        cwd: session.cwd,
-        shell: session.shell
-      });
-    });
-
-    this.sessionManager.on('closed', ({ sessionId }) => {
-      this._send({ type: 'session_closed', sessionId });
-    });
-
-    this.sessionManager.on('exit', ({ sessionId, exitCode }) => {
-      this._send({ type: 'session_exit', sessionId, exitCode });
-    });
+    this.sessionManager.on('output', this._onOutput);
+    this.sessionManager.on('created', this._onCreated);
+    this.sessionManager.on('closed', this._onClosed);
+    this.sessionManager.on('exit', this._onExit);
   }
 
   // 连接到中继服务器
@@ -133,6 +122,11 @@ class RelayClient extends EventEmitter {
     this._destroyed = true;
     clearTimeout(this.reconnectTimer);
     if (this.ws) this.ws.close();
+    
+    this.sessionManager.off('output', this._onOutput);
+    this.sessionManager.off('created', this._onCreated);
+    this.sessionManager.off('closed', this._onClosed);
+    this.sessionManager.off('exit', this._onExit);
   }
 }
 

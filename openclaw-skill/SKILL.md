@@ -1,81 +1,68 @@
 ---
 name: cloudhand-term
-description: Connect to a user's local CloudHand Mini-Term for remote terminal access via WebSocket relay.
-metadata: { "openclaw": { "emoji": "☁️", "requires": { "bins": ["node", "npm"] }, "os": ["darwin", "linux", "win32"] } }
+description: Connect to a user's local CloudHand Mini-Term for remote terminal access via WebSocket relay. Requires handling Token-based auth and internal pair-code hot reloading.
+metadata: { "openclaw": { "emoji": "☁️", "requires": { "bins": ["node", "npm", "curl"] }, "os": ["darwin", "linux", "win32"] } }
 ---
 
-# CloudHand Terminal — 远程终端连接
+# CloudHand Terminal — 远程终端连接 (极严密防护模式)
 
-当用户要求连接他们的本地终端（如 "连接我电脑的终端", "connect to my terminal", "打开远程终端"）时，按以下步骤执行：
+在这个极具赛博分离架构的终端桥接系统中，整个访问逻辑围绕着**五分钟动态锁**与**内部命令提权**展开。
 
-## 第一步：启动中继服务器
+## 第一步：启动中继服务器（门禁架设）
 
-1. 生成一个 6 位随机配对码（如 `123456`）
-2. 选择一个可用端口（默认 `3456`，如果被占用则递增）
-3. 安装依赖并启动中继服务器：
+中继服务器仅提供通道，不负责决定正确的接入配对码，因为配对码是由**用户本地运行的托盘客户端每 5 分钟生成的**。
+
+1. 你只需启动中继服务器，随便赋一个随机的临时防撞密码和找一个不互斥的端口（如 `3456`）：
 
 ```bash
 cd {baseDir}
 npm install --production 2>/dev/null
-node relay-server.js --pair-code <配对码> --port <端口> &
+node relay-server.js --pair-code <随机临时6位> --port <端口> &
 ```
 
-4. 确认中继服务器已启动（检查端口是否在监听）
+2. 确认中继已成功监听端口待命。并且告诉用户这个系统的公网访问**中继链接**。
 
-## 第二步：告知用户运行本地命令
+## 第二步：等待密旨在内网热更！
 
-确定当前主机的公网地址或域名（可通过 `hostname -I`, `curl ifconfig.me`, 或已知的域名配置获取），然后告诉用户：
-
-> 好的，请在你的电脑上打开一个终端，进入 CloudHand Mini-Term 项目目录，运行以下命令：
->
-> ```
-> node server.js --paircode=<配对码> --host=<公网地址>:<端口>
-> ```
->
-> 运行后它会自动连接到我这边。
-
-## 第三步：等待连接建立
-
-轮询中继服务器状态，等待本地终端连接：
+系统运转前，你须等待用户在聊天框里汇报他托盘当前正在生效的**6位数字配对码**。
+如果你看到用户发口令（如"我新密码是283371", "本地改了,445588"），你必须**立刻**调用受白名单严格保护的 `127.0.0.1` 管理通道，热更新中继的安全凭证：
 
 ```bash
-curl -s http://localhost:<端口>/api/status
-```
-
-当 `terminalConnected` 为 `true` 时，连接已建立。
-
-## 第四步：通知用户连接成功
-
-连接成功后，告诉用户：
-
-> 🎉 好消息！我们已经成功连接到你的电脑了！
->
-> 现在打开这个链接来使用远程终端：
-> **http://<公网地址>:<端口>**
->
-> 页面左侧是会话管理列表，右侧是你电脑的终端。
-
-## 与终端交互
-
-连接建立后，你可以通过 REST API 与终端交互：
-
-### 发送终端命令
-```bash
-curl -X POST http://localhost:<端口>/api/exec \
+curl -X POST http://127.0.0.1:<端口>/api/internal/paircode \
   -H "Content-Type: application/json" \
-  -d '{"command": "ls -la\n", "sessionId": "s1"}'
+  -d '{"pairCode": "<用户报的配对码>"}'
 ```
 
-```
+一旦更新，公网上的中继服务器会在几秒内成功校验通过用户本地那台不断“撞门”重试的托盘客机。
+接着，在对话中回答：“锁定解除，本地已与公网中继器双向握手联通！”
 
-### 查询连接状态
+## 第三步：自身 API 命令的提权操作 (Token 取号)
+
+由于服务器现采用非常纯粹极简的高密安全体系拦截公网裸调请求（全部强制 24h 生命周期 Token），如果你这个智能体自己也想帮用户运行命令（如调 `/api/exec`），你不能再直接明文发 `pairCode` 当护照了！
+你必须先通过鉴权以获得系统颁发的随机 UUID Token 门票！
+
+### 1. 索取 Cookie (Token)
+
 ```bash
-curl -s http://localhost:<端口>/api/status
+curl -s -c cookies.txt -X POST http://127.0.0.1:<端口>/api/auth \
+  -H "Content-Type: application/json" \
+  -d '{"pairCode": "<当前生效的配对码>"}'
+```
+*这将在 `cookies.txt` 中写入长达 24 小时寿命的高权凭证 `token`。*
+
+### 2. 通过 Cookie 携票向终端发送执行命令
+
+拿到门票后，不论发送多少次，你只需带上刚才提取出来的 Cookie（或者如果手提提取出来的值使用 `-H "Authorization: Bearer <token值>"`）：
+
+```bash
+curl -X POST http://127.0.0.1:<端口>/api/exec \
+  -b cookies.txt \
+  -H "Content-Type: application/json" \
+  -d '{"command": "dir\n", "sessionId": "default"}'
 ```
 
-## 注意事项
+## 注意事项与常见错误排查
 
-- 中继服务器一次只允许一个本地终端连接
-- 配对码用于验证本地终端的身份，确保连接安全
-- 如果用户断开重连，需要使用相同的配对码
-- Web UI 通过 CDN 加载 xterm.js，用户的浏览器需要能访问外网
+- **禁止网页泄漏密码指南**：`GET /` 现在是一个哑巴密码输入框，它绝不会泄露怎么使用或者向访客生成推荐配对码。任何人想获得权限的唯一入口在于拥有本地托盘上的五分钟流转临时凭证。
+- **存活不断流特性**：Token 寿命仅控制登录门禁（`API请求` 和 `前端UI的初次WebSocket握手`），但是已经建立起来的 Web UI 到终端的数据长流并不会在 24 小时一到后崩断。
+- **5分钟更新阵痛期**：由于用户的电脑每 5 分钟换密码，如果他们遇到网络环境抖动正好断线并且错过了刚才的密码匹配期，需要在对话框里催要下最新的 6 位码再通过 `internal` 桥刷一遍。
