@@ -168,6 +168,9 @@ const server = http.createServer((req, res) => {
 
   // API: 在线机器列表（供 OpenClaw 查询，不暴露 token）
   if (req.method === 'GET' && req.url === '/api/clients') {
+    if (!isLocalRequest(req)) {
+      return jsonResponse(res, 403, { error: 'Forbidden', message: 'Local access only' });
+    }
     const list = Array.from(clientRegistry.values()).map(c => ({
       computer_name: c.computer_name,
       connected: terminalClients.has(c.token),
@@ -179,6 +182,9 @@ const server = http.createServer((req, res) => {
 
   // API: 连接状态
   if (req.method === 'GET' && req.url === '/api/status') {
+    if (!isLocalRequest(req)) {
+      return jsonResponse(res, 403, { error: 'Forbidden', message: 'Local access only' });
+    }
     jsonResponse(res, 200, {
       terminalCount: terminalClients.size,
       uiClients: uiClients.size,
@@ -391,6 +397,22 @@ function readBody(req, cb) {
 function jsonResponse(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(data));
+}
+
+/**
+ * 检查请求是否来自本地
+ * 支持 IPv4/IPv6 环回地址，并检查 X-Forwarded-For 以防伪造
+ */
+function isLocalRequest(req) {
+  const remoteAddr = req.socket.remoteAddress;
+  const forwardedFor = req.headers['x-forwarded-for'];
+
+  // 如果有 X-Forwarded-For 且我们不信任代理，则认为不是直接本地请求
+  // (在 mini-term 模式下，通常不经过代理直接暴露)
+  if (forwardedFor) return false;
+
+  const localAddrs = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+  return localAddrs.includes(remoteAddr);
 }
 
 // ==================== 启动 ====================
