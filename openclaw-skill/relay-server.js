@@ -2,7 +2,8 @@
  * CloudHand 中继服务器
  * 由 OpenClaw AI 智能体启动，桥接本地终端和远程 Web UI
  *
- * 用法: node relay-server.js --pair-code <CODE> --port <PORT>
+ * 用法: node relay-server.js [--pair-code <CODE>] --port <PORT>
+ * 配对码可选：不填则只放行 token 流量
  */
 
 const http = require('http');
@@ -31,11 +32,7 @@ function parseArgs() {
     }
   }
 
-  if (!config.pairCode) {
-    console.error('错误: 必须指定 --pair-code 参数');
-    process.exit(1);
-  }
-
+  // 配对码不再强制要求，为空表示暂不接受配对
   return config;
 }
 
@@ -46,9 +43,45 @@ const config = parseArgs();
 let terminalClient = null;       // 本地 CloudHand 应用的 WS 连接
 const uiClients = new Set();     // 浏览器 Web UI 的 WS 连接集合
 
-let currentPairCode = config.pairCode;
+let currentPairCode = config.pairCode || null;
+let pairCodeTimer = null;        // 配对码过期计时器
+const PAIR_CODE_TTL = 5 * 60 * 1000; // 配对码 5 分钟有效
+
 const validTokens = new Map(); // token -> { createdAt }
 const TOKEN_MAX_AGE = 24 * 3600 * 1000; // 24小时 (毫秒)
+
+// ---- 配对码管理 ----
+
+function setPairCode(code) {
+  // 清除旧的过期计时器
+  if (pairCodeTimer) {
+    clearTimeout(pairCodeTimer);
+    pairCodeTimer = null;
+  }
+
+  currentPairCode = code ? String(code) : null;
+
+  if (currentPairCode) {
+    // 启动 5 分钟过期计时器
+    pairCodeTimer = setTimeout(() => {
+      console.log(`\n[中继] ⏰ 配对码已过期（5分钟），已自动清空`);
+      currentPairCode = null;
+      pairCodeTimer = null;
+    }, PAIR_CODE_TTL);
+    console.log(`\n[中继] 🔐 配对码已设置，5 分钟内有效`);
+  }
+}
+
+// 如果启动时带了配对码，启动过期计时器
+if (currentPairCode) {
+  pairCodeTimer = setTimeout(() => {
+    console.log(`\n[中继] ⏰ 配对码已过期（5分钟），已自动清空`);
+    currentPairCode = null;
+    pairCodeTimer = null;
+  }, PAIR_CODE_TTL);
+}
+
+// ---- Token 管理 ----
 
 function isTokenValid(token) {
   if (!token) return false;
@@ -59,6 +92,12 @@ function isTokenValid(token) {
     return false;
   }
   return true;
+}
+
+function issueToken() {
+  const token = crypto.randomUUID();
+  validTokens.set(token, { createdAt: Date.now() });
+  return token;
 }
 
 function parseCookies(req) {
@@ -81,32 +120,48 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 首页 — 检查 Token，返回 ui.html 或 login.html
-  if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
+  // 首页 — 处理 URL token 参数 或 cookie token
+  if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html' || req.url.startsWith('/?'))) {
+    const urlObj = new URL(req.url, `http://${req.headers.host}`);
+    const queryToken = urlObj.searchParams.get('token');
     const cookies = parseCookies(req);
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    try {
-      if (isTokenValid(cookies.token)) {
-        res.end(fs.readFileSync(path.join(__dirname, 'ui.html'), 'utf8'));
+
+    // URL 带 token：验证后设置 cookie 并重定向到干净的 /
+    if (queryToken) {
+      if (isTokenValid(queryToken)) {
+        res.writeHead(302, {
+          'Location': '/',
+          'Set-Cookie': `token=${queryToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`
+        });
+        res.end();
       } else {
-        res.end(fs.readFileSync(path.join(__dirname, 'login.html'), 'utf8'));
+        // token 无效，显示提示页
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(loadHtmlFile('login.html'));
       }
-    } catch (err) {
-      res.writeHead(500);
-      res.end('Failed to load UI files');
+      return;
     }
+
+    // Cookie 中有有效 token → 显示终端 UI
+    if (isTokenValid(cookies.token)) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(loadHtmlFile('ui.html'));
+      return;
+    }
+
+    // 无有效 token → 显示提示页
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(loadHtmlFile('login.html'));
     return;
   }
 
-  // API: 验证配对码，签发 Token
+  // API: 验证配对码，签发 Token（供网页端使用，保留兼容）
   if (req.method === 'POST' && req.url === '/api/auth') {
     readBody(req, (body) => {
       try {
         const { pairCode } = JSON.parse(body);
-        if (pairCode === currentPairCode) {
-          const token = crypto.randomUUID();
-          validTokens.set(token, { createdAt: Date.now() });
-          
+        if (currentPairCode && pairCode === currentPairCode) {
+          const token = issueToken();
           res.writeHead(200, {
             'Content-Type': 'application/json',
             'Set-Cookie': `token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`
@@ -133,11 +188,12 @@ const server = http.createServer((req, res) => {
       try {
         const { pairCode } = JSON.parse(body);
         if (pairCode) {
-          currentPairCode = String(pairCode);
+          setPairCode(pairCode);
           jsonResponse(res, 200, { ok: true, currentPairCode });
-          console.log(`\n[中继] 🔐 配对码已被内网指令热更新`);
         } else {
-          jsonResponse(res, 400, { error: 'Missing pairCode' });
+          // 允许清空配对码
+          setPairCode(null);
+          jsonResponse(res, 200, { ok: true, currentPairCode: null });
         }
       } catch {
         jsonResponse(res, 400, { error: 'Bad Request' });
@@ -150,7 +206,8 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/api/status') {
     jsonResponse(res, 200, {
       terminalConnected: !!(terminalClient && terminalClient.readyState === WebSocket.OPEN),
-      uiClients: uiClients.size
+      uiClients: uiClients.size,
+      hasPairCode: !!currentPairCode
     });
     return;
   }
@@ -158,6 +215,14 @@ const server = http.createServer((req, res) => {
   res.writeHead(404);
   res.end('Not Found');
 });
+
+function loadHtmlFile(filename) {
+  try {
+    return fs.readFileSync(path.join(__dirname, filename), 'utf8');
+  } catch (err) {
+    return '<h1>Error loading page</h1>';
+  }
+}
 
 // ==================== WebSocket 服务器 ====================
 
@@ -213,15 +278,47 @@ function handleTerminalConnection(ws) {
 
     // 未认证时只接受 auth 消息
     if (!authenticated) {
-      if (msg.type === 'auth' && msg.pairCode === currentPairCode) {
-        clearTimeout(authTimeout);
-        authenticated = true;
-        terminalClient = ws;
-        ws.send(JSON.stringify({ type: 'auth_ok' }));
-        broadcastToUI({ type: 'terminal_connected' });
-        console.log('[中继] ✅ 本地终端已连接并认证');
-      } else if (msg.type === 'auth') {
-        ws.send(JSON.stringify({ type: 'auth_fail', reason: '配对码错误' }));
+      if (msg.type === 'auth') {
+        // 方式一：token 认证（断线重连/重启恢复）
+        if (msg.token && isTokenValid(msg.token)) {
+          clearTimeout(authTimeout);
+          authenticated = true;
+          terminalClient = ws;
+          ws.send(JSON.stringify({ type: 'auth_ok' }));
+          broadcastToUI({ type: 'terminal_connected' });
+          console.log('[中继] ✅ 本地终端已通过 token 认证连接');
+          return;
+        }
+
+        // 方式二：配对码认证（首次配对）
+        if (msg.pairCode) {
+          if (!currentPairCode) {
+            ws.send(JSON.stringify({ type: 'auth_fail', reason: '中继暂无配对码，请先让 OpenClaw 设置' }));
+            return;
+          }
+          if (msg.pairCode === currentPairCode) {
+            clearTimeout(authTimeout);
+            authenticated = true;
+            terminalClient = ws;
+
+            // 签发 token 给终端（用于后续重连）
+            const token = issueToken();
+            ws.send(JSON.stringify({ type: 'auth_ok', token }));
+            broadcastToUI({ type: 'terminal_connected' });
+
+            // 配对成功后清空配对码（一次性使用）
+            setPairCode(null);
+
+            console.log('[中继] ✅ 本地终端已通过配对码认证，已签发 token');
+            return;
+          } else {
+            ws.send(JSON.stringify({ type: 'auth_fail', reason: '配对码错误' }));
+            return;
+          }
+        }
+
+        // 没提供有效凭证
+        ws.send(JSON.stringify({ type: 'auth_fail', reason: '请提供配对码或 token' }));
       }
       return;
     }
@@ -315,9 +412,8 @@ server.listen(config.port, () => {
   console.log(`║  Web UI:    http://localhost:${config.port}`);
   console.log(`║  WS 终端:   ws://localhost:${config.port}/ws/terminal`);
   console.log(`║  WS UI:     ws://localhost:${config.port}/ws/ui`);
-  console.log(`║  配对码:    🔑 ${config.pairCode}`);
+  console.log(`║  配对码:    ${currentPairCode ? '🔑 ' + currentPairCode + ' (5分钟有效)' : '⏸️  未设置 (仅放行 token 流量)'}`);
   console.log('║  状态:      ⏳ 等待本地终端连接...');
   console.log('╚════════════════════════════════════════════════╝');
   console.log('');
 });
-
