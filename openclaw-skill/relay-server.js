@@ -1,9 +1,9 @@
 /**
- * CloudHand 中继服务器
+ * CloudHand 中继服务器 (v2 - Token 直连认证)
  * 由 OpenClaw AI 智能体启动，桥接本地终端和远程 Web UI
  *
- * 用法: node relay-server.js [--pair-code <CODE>] --port <PORT>
- * 配对码可选：不填则只放行 token 流量
+ * 用法: node relay-server.js --port <PORT>
+ * 本地机器带着自己的 Token 主动连接，中继自动注册并记住
  */
 
 const http = require('http');
@@ -16,100 +16,111 @@ const { WebSocketServer, WebSocket } = require('ws');
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const config = { port: 3456, pairCode: null };
+  const config = { port: 3456 };
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith('--pair-code=')) {
-      config.pairCode = args[i].split('=')[1];
-    } else if (args[i] === '--pair-code' && args[i + 1]) {
-      config.pairCode = args[i + 1];
-      i++;
-    } else if (args[i].startsWith('--port=')) {
+    if (args[i].startsWith('--port=')) {
       config.port = parseInt(args[i].split('=')[1]);
     } else if (args[i] === '--port' && args[i + 1]) {
       config.port = parseInt(args[i + 1]);
       i++;
+    } else if (args[i].startsWith('--pair-code')) {
+      // 兼容旧参数，打印警告后忽略
+      console.warn('[中继] ⚠️  --pair-code 参数已废弃，已忽略。新版使用 Token 直连认证。');
+      if (args[i] === '--pair-code' && args[i + 1]) i++;
     }
   }
 
-  // 配对码不再强制要求，为空表示暂不接受配对
   return config;
 }
 
 const config = parseArgs();
 
-// ==================== 状态管理 ====================
+// ==================== 客户端注册表（持久化） ====================
 
-let terminalClient = null;       // 本地 CloudHand 应用的 WS 连接
-const uiClients = new Set();     // 浏览器 Web UI 的 WS 连接集合
+const CLIENTS_FILE = path.join(__dirname, 'clients.json');
+const CLIENT_TTL = 60 * 60 * 1000;       // 1小时未连接则清理
+const CLEANUP_INTERVAL = 10 * 60 * 1000; // 每10分钟清理一次
 
-let currentPairCode = config.pairCode || null;
-let pairCodeTimer = null;        // 配对码过期计时器
-const PAIR_CODE_TTL = 5 * 60 * 1000; // 配对码 5 分钟有效
+// 内存中的注册表: token -> { token, computer_name, firstSeen, lastSeen }
+let clientRegistry = new Map();
 
-const validTokens = new Map(); // token -> { createdAt }
-const TOKEN_MAX_AGE = 24 * 3600 * 1000; // 24小时 (毫秒)
+// 当前活跃的终端 WS 连接: token -> WebSocket
+const terminalClients = new Map();
 
-// ---- 配对码管理 ----
+// 浏览器 UI 连接: Set<{ws, token}>
+const uiClients = new Set();
 
-function setPairCode(code) {
-  // 清除旧的过期计时器
-  if (pairCodeTimer) {
-    clearTimeout(pairCodeTimer);
-    pairCodeTimer = null;
-  }
+// ---- 注册表的加载/保存 ----
 
-  currentPairCode = code ? String(code) : null;
-
-  if (currentPairCode) {
-    // 启动 5 分钟过期计时器
-    pairCodeTimer = setTimeout(() => {
-      console.log(`\n[中继] ⏰ 配对码已过期（5分钟），已自动清空`);
-      currentPairCode = null;
-      pairCodeTimer = null;
-    }, PAIR_CODE_TTL);
-    console.log(`\n[中继] 🔐 配对码已设置，5 分钟内有效`);
+function loadClients() {
+  try {
+    if (fs.existsSync(CLIENTS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(CLIENTS_FILE, 'utf8'));
+      clientRegistry = new Map(data.map(c => [c.token, c]));
+      console.log(`[中继] 📂 已加载 ${clientRegistry.size} 条客户端记录`);
+    }
+  } catch (err) {
+    console.warn('[中继] ⚠️  clients.json 读取失败，以空注册表启动:', err.message);
+    clientRegistry = new Map();
   }
 }
 
-// 如果启动时带了配对码，启动过期计时器
-if (currentPairCode) {
-  pairCodeTimer = setTimeout(() => {
-    console.log(`\n[中继] ⏰ 配对码已过期（5分钟），已自动清空`);
-    currentPairCode = null;
-    pairCodeTimer = null;
-  }, PAIR_CODE_TTL);
-}
-
-// ---- Token 管理 ----
-
-function isTokenValid(token) {
-  if (!token) return false;
-  const info = validTokens.get(token);
-  if (!info) return false;
-  if (Date.now() - info.createdAt > TOKEN_MAX_AGE) {
-    validTokens.delete(token);
-    return false;
+function saveClients() {
+  try {
+    const data = Array.from(clientRegistry.values());
+    fs.writeFileSync(CLIENTS_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('[中继] ❌ clients.json 保存失败:', err.message);
   }
-  return true;
 }
 
-function issueToken() {
-  const token = crypto.randomUUID();
-  validTokens.set(token, { createdAt: Date.now() });
-  return token;
+// 注册或更新客户端（首来即信任）
+function upsertClient(token, computerName) {
+  const now = Date.now();
+  const existing = clientRegistry.get(token);
+
+  if (existing) {
+    existing.computer_name = computerName || existing.computer_name;
+    existing.lastSeen = now;
+  } else {
+    clientRegistry.set(token, {
+      token,
+      computer_name: computerName || '未命名',
+      firstSeen: now,
+      lastSeen: now
+    });
+  }
+  saveClients();
 }
 
-function parseCookies(req) {
-  const list = {};
-  const hdr = req.headers.cookie;
-  if (!hdr) return list;
-  hdr.split(';').forEach(cookie => {
-    let parts = cookie.split('=');
-    list[parts.shift().trim()] = decodeURI(parts.join('='));
-  });
-  return list;
+// 检查 token 是否已注册（或允许新注册）
+function isTokenKnown(token) {
+  return token && typeof token === 'string' && token.length > 8;
 }
+
+// 定时清理过期记录
+function cleanupClients() {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [token, info] of clientRegistry) {
+    // 超过1小时未连接 且 当前不在线
+    if (now - info.lastSeen > CLIENT_TTL && !terminalClients.has(token)) {
+      clientRegistry.delete(token);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    saveClients();
+    console.log(`[中继] 🧹 清理了 ${cleaned} 条过期客户端记录`);
+  }
+}
+
+// 加载已有数据
+loadClients();
+
+// 启动定时清理
+setInterval(cleanupClients, CLEANUP_INTERVAL);
 
 // ==================== HTTP 服务器 ====================
 
@@ -126,24 +137,24 @@ const server = http.createServer((req, res) => {
     const queryToken = urlObj.searchParams.get('token');
     const cookies = parseCookies(req);
 
-    // URL 带 token：验证后设置 cookie 并直接返回 UI（不重定向，避免 cookie 丢失）
+    // URL 带 token：验证后设置 cookie 并直接返回 UI
     if (queryToken) {
-      if (isTokenValid(queryToken)) {
+      if (clientRegistry.has(queryToken)) {
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Set-Cookie': `token=${queryToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`
         });
         res.end(loadHtmlFile('ui.html'));
       } else {
-        // token 无效，显示提示页
+        // token 未注册（该机器从未连接过），显示提示页
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(loadHtmlFile('login.html'));
       }
       return;
     }
 
-    // Cookie 中有有效 token → 显示终端 UI
-    if (isTokenValid(cookies.token)) {
+    // Cookie 中有已注册的 token → 显示终端 UI
+    if (cookies.token && clientRegistry.has(cookies.token)) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(loadHtmlFile('ui.html'));
       return;
@@ -155,59 +166,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // API: 验证配对码，签发 Token（供网页端使用，保留兼容）
-  if (req.method === 'POST' && req.url === '/api/auth') {
-    readBody(req, (body) => {
-      try {
-        const { pairCode } = JSON.parse(body);
-        if (currentPairCode && pairCode === currentPairCode) {
-          const token = issueToken();
-          res.writeHead(200, {
-            'Content-Type': 'application/json',
-            'Set-Cookie': `token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`
-          });
-          res.end(JSON.stringify({ ok: true }));
-        } else {
-          jsonResponse(res, 401, { error: 'Access Denied' });
-        }
-      } catch {
-        jsonResponse(res, 400, { error: 'Bad Request' });
-      }
-    });
-    return;
-  }
-
-  // API: 内网热更新配对码 (仅限本地 127.0.0.1 访问)
-  if (req.method === 'POST' && req.url === '/api/internal/paircode') {
-    const ip = req.socket.remoteAddress;
-    if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') {
-      jsonResponse(res, 403, { error: 'Forbidden' });
-      return;
-    }
-    readBody(req, (body) => {
-      try {
-        const { pairCode } = JSON.parse(body);
-        if (pairCode) {
-          setPairCode(pairCode);
-          jsonResponse(res, 200, { ok: true, currentPairCode });
-        } else {
-          // 允许清空配对码
-          setPairCode(null);
-          jsonResponse(res, 200, { ok: true, currentPairCode: null });
-        }
-      } catch {
-        jsonResponse(res, 400, { error: 'Bad Request' });
-      }
-    });
+  // API: 在线机器列表（供 OpenClaw 查询，不暴露 token）
+  if (req.method === 'GET' && req.url === '/api/clients') {
+    const list = Array.from(clientRegistry.values()).map(c => ({
+      computer_name: c.computer_name,
+      connected: terminalClients.has(c.token),
+      lastSeen: c.lastSeen
+    }));
+    jsonResponse(res, 200, list);
     return;
   }
 
   // API: 连接状态
   if (req.method === 'GET' && req.url === '/api/status') {
     jsonResponse(res, 200, {
-      terminalConnected: !!(terminalClient && terminalClient.readyState === WebSocket.OPEN),
+      terminalCount: terminalClients.size,
       uiClients: uiClients.size,
-      hasPairCode: !!currentPairCode
+      registeredClients: clientRegistry.size
     });
     return;
   }
@@ -235,18 +210,20 @@ server.on('upgrade', (request, socket, head) => {
   if (pathname === '/ws/terminal') {
     wss.handleUpgrade(request, socket, head, (ws) => handleTerminalConnection(ws));
   } else if (pathname === '/ws/ui') {
+    // 从 query 或 cookie 获取 token
     let token = urlObj.searchParams.get('token');
     if (!token) {
       const cookieStr = request.headers.cookie || '';
       const match = cookieStr.match(/token=([^;]+)/);
       if (match) token = match[1];
     }
-    if (!isTokenValid(token)) {
+    // token 必须是已注册的客户端
+    if (!token || !clientRegistry.has(token)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(request, socket, head, (ws) => handleUIConnection(ws, request));
+    wss.handleUpgrade(request, socket, head, (ws) => handleUIConnection(ws, request, token));
   } else {
     socket.destroy();
   }
@@ -255,14 +232,8 @@ server.on('upgrade', (request, socket, head) => {
 // ---- 本地终端连接处理 ----
 
 function handleTerminalConnection(ws) {
-  // 只允许一个终端连接
-  if (terminalClient) {
-    ws.send(JSON.stringify({ type: 'error', message: '已有终端连接' }));
-    ws.close();
-    return;
-  }
-
   let authenticated = false;
+  let clientToken = null;
 
   // 10 秒认证超时
   const authTimeout = setTimeout(() => {
@@ -279,62 +250,57 @@ function handleTerminalConnection(ws) {
     // 未认证时只接受 auth 消息
     if (!authenticated) {
       if (msg.type === 'auth') {
-        // 方式一：token 认证（断线重连/重启恢复）
-        if (msg.token && isTokenValid(msg.token)) {
-          clearTimeout(authTimeout);
-          authenticated = true;
-          terminalClient = ws;
-          ws.send(JSON.stringify({ type: 'auth_ok' }));
-          broadcastToUI({ type: 'terminal_connected' });
-          console.log('[中继] ✅ 本地终端已通过 token 认证连接');
+        const token = msg.token;
+        const computerName = msg.computer_name;
+
+        // 验证 token 格式有效性（UUID 级别长度）
+        if (!isTokenKnown(token)) {
+          ws.send(JSON.stringify({ type: 'auth_fail', reason: '无效 token' }));
+          ws.close();
           return;
         }
 
-        // 方式二：配对码认证（首次配对）
-        if (msg.pairCode) {
-          if (!currentPairCode) {
-            ws.send(JSON.stringify({ type: 'auth_fail', reason: '中继暂无配对码，请先让 OpenClaw 设置' }));
-            return;
-          }
-          if (msg.pairCode === currentPairCode) {
-            clearTimeout(authTimeout);
-            authenticated = true;
-            terminalClient = ws;
-
-            // 签发 token 给终端（用于后续重连）
-            const token = issueToken();
-            ws.send(JSON.stringify({ type: 'auth_ok', token }));
-            broadcastToUI({ type: 'terminal_connected' });
-
-            // 配对成功后清空配对码（一次性使用）
-            setPairCode(null);
-
-            console.log('[中继] ✅ 本地终端已通过配对码认证，已签发 token');
-            return;
-          } else {
-            ws.send(JSON.stringify({ type: 'auth_fail', reason: '配对码错误' }));
-            return;
-          }
+        // 如果该 token 已有活跃连接，踢掉旧连接
+        if (terminalClients.has(token)) {
+          const oldWs = terminalClients.get(token);
+          try { oldWs.close(); } catch {}
         }
 
-        // 没提供有效凭证
-        ws.send(JSON.stringify({ type: 'auth_fail', reason: '请提供配对码或 token' }));
+        clearTimeout(authTimeout);
+        authenticated = true;
+        clientToken = token;
+
+        // 注册/更新到持久化注册表
+        upsertClient(token, computerName);
+
+        // 存入活跃连接 Map
+        terminalClients.set(token, ws);
+
+        const info = clientRegistry.get(token);
+        ws.send(JSON.stringify({ type: 'auth_ok', computer_name: info.computer_name }));
+
+        // 通知此 token 下的所有 UI 客户端
+        broadcastToUIByToken(token, { type: 'terminal_connected', computer_name: info.computer_name });
+
+        console.log(`[中继] ✅ 终端已连接: "${info.computer_name}" (当前共 ${terminalClients.size} 台)`);
       }
       return;
     }
 
-    // 认证后：终端消息转发给所有 UI 客户端
+    // 认证后：终端消息转发给对应 token 的 UI 客户端
     if (['output', 'session_created', 'session_closed', 'session_exit', 'session_list'].includes(msg.type)) {
-      broadcastToUI(msg);
+      broadcastToUIByToken(clientToken, msg);
     }
   });
 
   ws.on('close', () => {
     clearTimeout(authTimeout);
-    if (terminalClient === ws) {
-      terminalClient = null;
-      broadcastToUI({ type: 'terminal_disconnected' });
-      console.log('[中继] ❌ 本地终端已断开');
+    if (clientToken && terminalClients.get(clientToken) === ws) {
+      terminalClients.delete(clientToken);
+      broadcastToUIByToken(clientToken, { type: 'terminal_disconnected' });
+      const info = clientRegistry.get(clientToken);
+      const name = info ? info.computer_name : clientToken;
+      console.log(`[中继] ❌ 终端已断开: "${name}" (当前共 ${terminalClients.size} 台)`);
     }
   });
 
@@ -345,26 +311,27 @@ function handleTerminalConnection(ws) {
 
 // ---- 浏览器 UI 连接处理 ----
 
-function handleUIConnection(ws, req) {
-  uiClients.add(ws);
+function handleUIConnection(ws, req, token) {
+  const client = { ws, token };
+  uiClients.add(client);
 
-  // 触发连接成功的事件
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  console.log(`[EVENT] UI_CLIENT_CONNECTED IP: ${clientIp}`);
-
-  // 如果配置了 NOTIFY_WEBHOOK，则向外发送通知
-  // 触发连接成功的事件，供监控通道截获
-  console.log(`[EVENT] 当前总共 ${uiClients.size} 个连接在你的电脑上`);
+  const info = clientRegistry.get(token);
+  const computerName = info ? info.computer_name : '未知';
+  console.log(`[EVENT] UI_CLIENT_CONNECTED IP: ${clientIp}, 目标机器: "${computerName}"`);
+  console.log(`[EVENT] 当前总共 ${uiClients.size} 个 UI 连接`);
 
   // 发送当前状态
+  const termWs = terminalClients.get(token);
   ws.send(JSON.stringify({
     type: 'init',
-    terminalConnected: !!(terminalClient && terminalClient.readyState === WebSocket.OPEN)
+    terminalConnected: !!(termWs && termWs.readyState === WebSocket.OPEN),
+    computer_name: computerName
   }));
 
   // 如果终端已连接，请求会话列表
-  if (terminalClient && terminalClient.readyState === WebSocket.OPEN) {
-    terminalClient.send(JSON.stringify({ type: 'list_sessions' }));
+  if (termWs && termWs.readyState === WebSocket.OPEN) {
+    termWs.send(JSON.stringify({ type: 'list_sessions' }));
   }
 
   ws.on('message', (raw) => {
@@ -372,31 +339,47 @@ function handleUIConnection(ws, req) {
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     switch (msg.type) {
-      // 终端操作：转发给本地终端
+      // 终端操作：转发给对应 token 的终端
       case 'input':
       case 'create_session':
       case 'close_session':
       case 'resize':
-      case 'list_sessions':
-        if (terminalClient && terminalClient.readyState === WebSocket.OPEN) {
-          terminalClient.send(JSON.stringify(msg));
+      case 'list_sessions': {
+        const tw = terminalClients.get(token);
+        if (tw && tw.readyState === WebSocket.OPEN) {
+          tw.send(JSON.stringify(msg));
         }
         break;
+      }
     }
   });
 
   ws.on('close', () => {
-    uiClients.delete(ws);
+    uiClients.delete(client);
   });
 }
 
 // ==================== 工具函数 ====================
 
-function broadcastToUI(data) {
+// 向指定 token 的所有 UI 客户端广播
+function broadcastToUIByToken(token, data) {
   const payload = JSON.stringify(data);
-  for (const ws of uiClients) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+  for (const client of uiClients) {
+    if (client.token === token && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(payload);
+    }
   }
+}
+
+function parseCookies(req) {
+  const list = {};
+  const hdr = req.headers.cookie;
+  if (!hdr) return list;
+  hdr.split(';').forEach(cookie => {
+    let parts = cookie.split('=');
+    list[parts.shift().trim()] = decodeURI(parts.join('='));
+  });
+  return list;
 }
 
 function readBody(req, cb) {
@@ -415,12 +398,14 @@ function jsonResponse(res, status, data) {
 server.listen(config.port, () => {
   console.log('');
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║       ☁️  CloudHand Relay Server               ║');
+  console.log('║       ☁️  CloudHand Relay Server  v2           ║');
   console.log('╠════════════════════════════════════════════════╣');
   console.log(`║  Web UI:    http://localhost:${config.port}`);
   console.log(`║  WS 终端:   ws://localhost:${config.port}/ws/terminal`);
   console.log(`║  WS UI:     ws://localhost:${config.port}/ws/ui`);
-  console.log(`║  配对码:    ${currentPairCode ? '🔑 ' + currentPairCode + ' (5分钟有效)' : '⏸️  未设置 (仅放行 token 流量)'}`);
+  console.log(`║  机器API:   http://localhost:${config.port}/api/clients`);
+  console.log(`║  已注册:    ${clientRegistry.size} 台机器`);
+  console.log('║  认证模式:  🔑 Token 直连 (首来即信任)');
   console.log('║  状态:      ⏳ 等待本地终端连接...');
   console.log('╚════════════════════════════════════════════════╝');
   console.log('');

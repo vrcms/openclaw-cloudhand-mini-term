@@ -244,11 +244,11 @@
     function handleMessage(msg) {
       switch (msg.type) {
         case 'init':
-          updateConnectionStatus(msg.terminalConnected);
+          updateConnectionStatus(msg.terminalConnected, msg.computer_name);
           break;
 
         case 'terminal_connected':
-          updateConnectionStatus(true);
+          updateConnectionStatus(true, msg.computer_name);
           break;
 
         case 'terminal_disconnected':
@@ -291,13 +291,15 @@
     }
 
     // ---- 连接状态 ----
-    function updateConnectionStatus(connected) {
+    function updateConnectionStatus(connected, computerName) {
       if (connected) {
         connBadge.classList.add('connected');
-        connText.textContent = '终端已连接';
+        connText.textContent = computerName ? '已连接: ' + computerName : '终端已连接';
+        if (computerName) document.title = computerName + ' | CloudHand Terminal';
       } else {
         connBadge.classList.remove('connected');
         connText.textContent = '等待终端连接';
+        document.title = 'CloudHand Terminal | 云手终端';
       }
     }
 

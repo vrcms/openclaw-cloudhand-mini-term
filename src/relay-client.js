@@ -4,17 +4,16 @@ const EventEmitter = require('events');
 /**
  * 中继客户端 — 主动连接到远程中继服务器，桥接本地 PTY 会话
  *
- * 认证策略：
- *   - 有 token 时优先用 token 认证（断线重连/重启恢复）
- *   - 没 token 时用 pairCode 认证（首次配对）
- *   - 认证成功时中继会签发 token，通过 'authenticated' 事件暴露
+ * 认证策略（v2 - Token 直连）：
+ *   - 启动时持有持久化 Token + computer_name，直接发送认证
+ *   - 断线后自动重连，使用同一 Token
  */
 class RelayClient extends EventEmitter {
-  constructor({ relayHost, pairCode, token, sessionManager }) {
+  constructor({ relayHost, token, computerName, sessionManager }) {
     super();
     this.relayHost = relayHost;
-    this.pairCode = pairCode;
-    this.token = token || null;       // 持久化的 token（用于重连）
+    this.token = token;
+    this.computerName = computerName || '未命名';
     this.sessionManager = sessionManager;
     this.ws = null;
     this.authenticated = false;
@@ -50,13 +49,15 @@ class RelayClient extends EventEmitter {
       console.log('[中继客户端] 已连接，正在认证...');
       this.emit('connected');
 
-      // 优先用 token 认证（断线重连），没有 token 才用配对码
+      // 直接用 Token + computer_name 认证
       if (this.token) {
-        this.ws.send(JSON.stringify({ type: 'auth', token: this.token }));
-      } else if (this.pairCode) {
-        this.ws.send(JSON.stringify({ type: 'auth', pairCode: this.pairCode }));
+        this.ws.send(JSON.stringify({
+          type: 'auth',
+          token: this.token,
+          computer_name: this.computerName
+        }));
       } else {
-        console.error('[中继客户端] ❌ 无认证凭据（既没有 token 也没有配对码）');
+        console.error('[中继客户端] ❌ 无 Token，无法认证');
         this.ws.close();
       }
     });
@@ -68,19 +69,10 @@ class RelayClient extends EventEmitter {
       if (!this.authenticated) {
         if (msg.type === 'auth_ok') {
           this.authenticated = true;
-          // 如果中继签发了新 token（首次配对），保存并通知
-          if (msg.token) {
-            this.token = msg.token;
-          }
-          this.emit('authenticated', { token: this.token, isNewToken: !!msg.token });
+          this.emit('authenticated', { computerName: msg.computer_name });
           console.log('[中继客户端] ✅ 认证成功！');
         } else if (msg.type === 'auth_fail') {
           console.error(`[中继客户端] ❌ 认证失败: ${msg.reason}`);
-          // token 失效时清除，下次需要重新配对
-          if (this.token) {
-            this.token = null;
-            this.emit('token_expired');
-          }
           this.emit('auth_failed', { reason: msg.reason });
           this.ws.close();
         }
@@ -97,16 +89,12 @@ class RelayClient extends EventEmitter {
       this.emit('disconnected');
 
       if (!this._destroyed) {
-        // 有 token 时自动重连（无需用户干预）
+        // 有 Token 时始终自动重连
         if (this.token) {
-          console.log('[中继客户端] 连接断开，3秒后用 token 自动重连...');
+          console.log('[中继客户端] 连接断开，3秒后自动重连...');
           this.reconnectTimer = setTimeout(() => this.connect(), 3000);
-        } else if (wasAuthenticated) {
-          // 曾经连接成功过但没有 token（理论上不会发生）
-          console.log('[中继客户端] 连接断开，无 token 不再自动重连');
         } else {
-          // 从未连接成功过，不自动重连（等待用户重新配对）
-          console.log('[中继客户端] 连接失败，等待用户重新配对');
+          console.log('[中继客户端] 连接断开，无 Token 不再自动重连');
         }
       }
     });

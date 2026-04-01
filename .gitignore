@@ -1,3 +1,10 @@
 node_modules/
 public/js/bundle.js
 .env
+settings.json
+settings-bak.json
+openclaw-skill/clients.json
+openspec/
+.agent/
+.spec-workflow/
+AGENTS.md
