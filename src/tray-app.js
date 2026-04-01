@@ -108,14 +108,16 @@ class TrayApp {
 
   updateTray() {
     if (!this.menuReady || !this.systray) return;
+    // 用 update-item 更新状态菜单项（比 update-menu 更可靠）
     this.systray.sendAction({
-      type: 'update-menu',
-      menu: {
-        icon: this.icon,
-        title: "CloudHand",
-        tooltip: "CloudHand Mini-Term",
-        items: this.buildMenuItems()
-      }
+      type: 'update-item',
+      item: {
+        title: `状态: ${this.connStatus} (${this.settings.relayHost || '未配置服务器'})`,
+        tooltip: "状态",
+        checked: false,
+        enabled: false,
+      },
+      seq_id: 0
     });
   }
 

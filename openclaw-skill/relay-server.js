@@ -246,7 +246,7 @@ server.on('upgrade', (request, socket, head) => {
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(request, socket, head, (ws) => handleUIConnection(ws));
+    wss.handleUpgrade(request, socket, head, (ws) => handleUIConnection(ws, request));
   } else {
     socket.destroy();
   }
@@ -345,8 +345,16 @@ function handleTerminalConnection(ws) {
 
 // ---- 浏览器 UI 连接处理 ----
 
-function handleUIConnection(ws) {
+function handleUIConnection(ws, req) {
   uiClients.add(ws);
+
+  // 触发连接成功的事件
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  console.log(`[EVENT] UI_CLIENT_CONNECTED IP: ${clientIp}`);
+
+  // 如果配置了 NOTIFY_WEBHOOK，则向外发送通知
+  // 触发连接成功的事件，供监控通道截获
+  console.log(`[EVENT] 当前总共 ${uiClients.size} 个连接在你的电脑上`);
 
   // 发送当前状态
   ws.send(JSON.stringify({
