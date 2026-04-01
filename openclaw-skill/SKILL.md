@@ -36,31 +36,6 @@ curl -X POST http://127.0.0.1:<端口>/api/internal/paircode \
 一旦更新，公网上的中继服务器会在几秒内成功校验通过用户本地那台不断“撞门”重试的托盘客机。
 接着，在对话中回答：“锁定解除，本地已与公网中继器双向握手联通！”
 
-## 第三步：自身 API 命令的提权操作 (Token 取号)
-
-由于服务器现采用非常纯粹极简的高密安全体系拦截公网裸调请求（全部强制 24h 生命周期 Token），如果你这个智能体自己也想帮用户运行命令（如调 `/api/exec`），你不能再直接明文发 `pairCode` 当护照了！
-你必须先通过鉴权以获得系统颁发的随机 UUID Token 门票！
-
-### 1. 索取 Cookie (Token)
-
-```bash
-curl -s -c cookies.txt -X POST http://127.0.0.1:<端口>/api/auth \
-  -H "Content-Type: application/json" \
-  -d '{"pairCode": "<当前生效的配对码>"}'
-```
-*这将在 `cookies.txt` 中写入长达 24 小时寿命的高权凭证 `token`。*
-
-### 2. 通过 Cookie 携票向终端发送执行命令
-
-拿到门票后，不论发送多少次，你只需带上刚才提取出来的 Cookie（或者如果手提提取出来的值使用 `-H "Authorization: Bearer <token值>"`）：
-
-```bash
-curl -X POST http://127.0.0.1:<端口>/api/exec \
-  -b cookies.txt \
-  -H "Content-Type: application/json" \
-  -d '{"command": "dir\n", "sessionId": "default"}'
-```
-
 ## 注意事项与常见错误排查
 
 - **禁止网页泄漏密码指南**：`GET /` 现在是一个哑巴密码输入框，它绝不会泄露怎么使用或者向访客生成推荐配对码。任何人想获得权限的唯一入口在于拥有本地托盘上的五分钟流转临时凭证。

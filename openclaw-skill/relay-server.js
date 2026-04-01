@@ -146,37 +146,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // API: AI 发送终端命令 (需要带 Token)
-  if (req.method === 'POST' && req.url === '/api/exec') {
-    let token = parseCookies(req).token;
-    if (!token && req.headers.authorization) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-    if (!isTokenValid(token)) {
-      jsonResponse(res, 401, { error: 'Unauthorized' });
-      return;
-    }
-
-    readBody(req, (body) => {
-      try {
-        const { command, sessionId } = JSON.parse(body);
-        if (terminalClient && terminalClient.readyState === WebSocket.OPEN) {
-          terminalClient.send(JSON.stringify({
-            type: 'input',
-            sessionId: sessionId || 'default',
-            data: command
-          }));
-          jsonResponse(res, 200, { ok: true });
-        } else {
-          jsonResponse(res, 503, { error: '终端未连接' });
-        }
-      } catch {
-        jsonResponse(res, 400, { error: 'JSON 格式错误' });
-      }
-    });
-    return;
-  }
-
   // API: 连接状态
   if (req.method === 'GET' && req.url === '/api/status') {
     jsonResponse(res, 200, {
