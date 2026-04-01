@@ -15,10 +15,7 @@ class CloudHandTerminal {
     this.sessionListEl = document.getElementById('sessionList');
     this.terminalWrapper = document.getElementById('terminal-wrapper');
     this.terminalPlaceholder = document.getElementById('terminal-placeholder');
-    this.pairCodeEl = document.getElementById('pairCode');
-    this.pairTimerEl = document.getElementById('pairTimer');
     this.newSessionBtn = document.getElementById('newSessionBtn');
-    this.remoteStatusEl = document.getElementById('remoteStatus');
 
     this.init();
   }
@@ -26,7 +23,6 @@ class CloudHandTerminal {
   init() {
     this.connectWs();
     this.bindEvents();
-    this.startCountdown();
   }
 
   // 连接本地 WS 服务
@@ -67,9 +63,7 @@ class CloudHandTerminal {
   handleMessage(msg) {
     switch (msg.type) {
       case 'pair_code':
-        this.pairCode = msg.pairCode;
-        this.pairCodeExpiry = msg.expiresAt;
-        this.updatePairCodeDisplay();
+        // 界面已移除配对码显示
         break;
 
       case 'session_list':
@@ -109,11 +103,8 @@ class CloudHandTerminal {
         break;
 
       case 'remote_connected':
-        this.updateRemoteStatus(true);
-        break;
-
       case 'remote_disconnected':
-        this.updateRemoteStatus(false);
+        // 界面已移除远程状态显示
         break;
 
       case 'error':
@@ -249,14 +240,11 @@ class CloudHandTerminal {
     for (const [id, session] of this.sessions) {
       const item = document.createElement('div');
       item.className = `session-item ${id === this.activeSessionId ? 'active' : ''}`;
-      // 显示简短路径
-      const shortCwd = session.cwd
-        ? session.cwd.replace(/^.*[/\\]/, '') || session.cwd
-        : '~';
+      // 显示完整路径以便于区分不同会话
+      const fullCwd = session.cwd || '~';
       item.innerHTML = `
-        <div class="session-info">
-          <span class="session-name">● ${session.shell || 'shell'}</span>
-          <span class="session-cwd">${shortCwd}</span>
+        <div class="session-info" title="${fullCwd}">
+          <span class="session-name" style="direction: ltr; font-size: 13px;">${fullCwd}</span>
         </div>
         <button class="session-close" data-id="${id}" title="关闭会话">×</button>
       `;
@@ -283,34 +271,7 @@ class CloudHandTerminal {
     }
   }
 
-  // 更新配对码显示
-  updatePairCodeDisplay() {
-    this.pairCodeEl.textContent = this.pairCode;
-  }
-
-  // 倒计时刷新
-  startCountdown() {
-    this.timerInterval = setInterval(() => {
-      if (!this.pairCodeExpiry) return;
-      const remaining = Math.max(0, this.pairCodeExpiry - Date.now());
-      const min = Math.floor(remaining / 60000);
-      const sec = Math.floor((remaining % 60000) / 1000);
-      this.pairTimerEl.textContent = `${min}:${sec.toString().padStart(2, '0')}`;
-    }, 1000);
-  }
-
-  // 更新远程连接状态
-  updateRemoteStatus(connected) {
-    if (this.remoteStatusEl) {
-      if (connected) {
-        this.remoteStatusEl.classList.add('connected');
-        this.remoteStatusEl.querySelector('.status-text').textContent = '远程已连接';
-      } else {
-        this.remoteStatusEl.classList.remove('connected');
-        this.remoteStatusEl.querySelector('.status-text').textContent = '等待连接';
-      }
-    }
-  }
+  // 移除无关的更新UI方法
 }
 
 // 启动

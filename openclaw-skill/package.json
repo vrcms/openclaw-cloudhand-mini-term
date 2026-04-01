@@ -1,0 +1,12 @@
+{
+  "name": "cloudhand-relay",
+  "version": "1.0.0",
+  "description": "CloudHand 中继服务器 — OpenClaw Skill 运行时组件",
+  "main": "relay-server.js",
+  "scripts": {
+    "start": "node relay-server.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
