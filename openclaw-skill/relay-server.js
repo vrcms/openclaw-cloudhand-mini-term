@@ -126,14 +126,14 @@ const server = http.createServer((req, res) => {
     const queryToken = urlObj.searchParams.get('token');
     const cookies = parseCookies(req);
 
-    // URL 带 token：验证后设置 cookie 并重定向到干净的 /
+    // URL 带 token：验证后设置 cookie 并直接返回 UI（不重定向，避免 cookie 丢失）
     if (queryToken) {
       if (isTokenValid(queryToken)) {
-        res.writeHead(302, {
-          'Location': '/',
-          'Set-Cookie': `token=${queryToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Set-Cookie': `token=${queryToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`
         });
-        res.end();
+        res.end(loadHtmlFile('ui.html'));
       } else {
         // token 无效，显示提示页
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

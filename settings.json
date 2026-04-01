@@ -1,3 +1,4 @@
 {
-  "relayHost": "opc.dabeizi.com:3456"
+  "relayHost": "opc.dabeizi.com:3456",
+  "token": "a1ab0c18-2346-4175-b744-76af8a59f0a5"
 }

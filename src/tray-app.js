@@ -69,22 +69,18 @@ class TrayApp {
       if (action.seq_id === 0) {
         // [状态] 不可点击
       } else if (action.seq_id === 1) {
-        // 复制配对码
-        import('clipboardy').then(clip => clip.default.writeSync(this.pairCode));
-      } else if (action.seq_id === 2) {
         // 打开设置
         if (open) open('http://127.0.0.1:9899');
-      } else if (action.seq_id === 3) {
+      } else if (action.seq_id === 2) {
         // 退出
         this.systray.kill();
         process.exit(0);
       }
     });
 
-    this.systray.ready().then(() => {
-      this.menuReady = true;
-      this.updateTray();
-    });
+    await this.systray.ready();
+    this.menuReady = true;
+    this.updateTray();
   }
 
   buildMenuItems() {
@@ -94,12 +90,6 @@ class TrayApp {
         tooltip: "状态",
         checked: false,
         enabled: false,
-      },
-      {
-        title: `🔑 复制本机配对码: [ ${this.pairCode} ]`,
-        tooltip: "点击复制密码并发送到聊天台",
-        checked: false,
-        enabled: true,
       },
       {
         title: "⚙️ 打开设置",
