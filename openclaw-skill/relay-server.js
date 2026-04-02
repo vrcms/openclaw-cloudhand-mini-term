@@ -400,17 +400,12 @@ function jsonResponse(res, status, data) {
 }
 
 /**
- * 检查请求是否来自本地
- * 支持 IPv4/IPv6 环回地址，并检查 X-Forwarded-For 以防伪造
+ * 检查请求是否来自本地（严格模式）
+ * 只信任 socket 层的真实地址，忽略任何代理头（防止伪造）
  */
 function isLocalRequest(req) {
   const remoteAddr = req.socket.remoteAddress;
-  const forwardedFor = req.headers['x-forwarded-for'];
-
-  // 如果有 X-Forwarded-For 且我们不信任代理，则认为不是直接本地请求
-  // (在 mini-term 模式下，通常不经过代理直接暴露)
-  if (forwardedFor) return false;
-
+  // 严格只接受本机环回地址，不信任任何代理头
   const localAddrs = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
   return localAddrs.includes(remoteAddr);
 }
@@ -420,7 +415,7 @@ function isLocalRequest(req) {
 server.listen(config.port, () => {
   console.log('');
   console.log('╔════════════════════════════════════════════════╗');
-  console.log('║       ☁️  CloudHand Relay Server  v2           ║');
+  console.log('║       ☁️  CloudHand Relay Server  v0.1.0       ║');
   console.log('╠════════════════════════════════════════════════╣');
   console.log(`║  Web UI:    http://localhost:${config.port}`);
   console.log(`║  WS 终端:   ws://localhost:${config.port}/ws/terminal`);

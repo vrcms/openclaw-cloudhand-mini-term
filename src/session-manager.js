@@ -1,5 +1,6 @@
 const os = require('os');
 const pty = require('node-pty');
+const crypto = require('crypto');
 const EventEmitter = require('events');
 
 // PTY 会话管理器
@@ -7,12 +8,12 @@ class SessionManager extends EventEmitter {
   constructor() {
     super();
     this.sessions = new Map();
-    this.nextId = 1;
   }
 
   // 创建新 PTY 会话
   createSession(options = {}) {
-    const id = `s${this.nextId++}`;
+    // 使用随机 ID 防止跨重启碰撞
+    const id = 's' + crypto.randomBytes(4).toString('hex');
     const defaultShell = process.env.DEFAULT_SHELL ||
       (os.platform() === 'win32' ? 'powershell.exe' : 'bash');
     const shell = options.shell || defaultShell;
