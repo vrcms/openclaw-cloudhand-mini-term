@@ -289,7 +289,7 @@ server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, (ws) => handleTerminalConnection(ws));
   } else if (urlObj.pathname === '/ws/ui') {
     // 从 query 或 cookie 获取 token
-    let token = urlObj.searchParams.get('token');
+    let token = urlObj.query.token;
     if (!token) {
       const cookieStr = request.headers.cookie || '';
       const match = cookieStr.match(/token=([^;]+)/);
