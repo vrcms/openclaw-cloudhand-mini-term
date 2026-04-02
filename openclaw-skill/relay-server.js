@@ -327,8 +327,9 @@ function handleTerminalConnection(ws) {
       if (msg.type === 'auth') {
         const token = msg.token;
         const computerName = msg.computer_name;
-        if (!isTokenKnown(token)) {
-          ws.send(JSON.stringify({ type: 'auth_fail', reason: '无效 token' }));
+        // 验证 token 格式有效性（避免无效连接）
+        if (!token || token.length < 16) {
+          ws.send(JSON.stringify({ type: 'auth_fail', reason: '无效 token 格式' }));
           ws.close();
           return;
         }
