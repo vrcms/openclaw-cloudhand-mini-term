@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CloudHand Terminal | 云手终端</title>
-  <meta name="description" content="CloudHand 远程终端交互界面 — AI 对话 + 终端操作">
+  <meta name="description" content="CloudHand 远程终端交互界面 — 多会话 + 多格布局">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
@@ -28,34 +28,27 @@
       --purple: #bc8cff;
       --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
       --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+      --topbar-h: 44px;
+      --tabsbar-h: 38px;
     }
     * { margin:0; padding:0; box-sizing:border-box; }
     html, body { height:100%; overflow:hidden; font-family:var(--font); background:var(--bg-primary); color:var(--text-primary); }
 
-    /* 全局滚动条美化 */
-    ::-webkit-scrollbar {
-      width: 6px;
-      height: 6px;
-    }
-    ::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    ::-webkit-scrollbar-thumb {
-      background: var(--border-color);
-      border-radius: 4px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-      background: var(--text-muted);
-    }
+    /* 全局滚动条 */
+    ::-webkit-scrollbar { width:6px; height:6px; }
+    ::-webkit-scrollbar-track { background:transparent; }
+    ::-webkit-scrollbar-thumb { background:var(--border-color); border-radius:4px; }
+    ::-webkit-scrollbar-thumb:hover { background:var(--text-muted); }
 
-    /* 全局布局 */
+    /* === App 框架 === */
     #app { display:flex; flex-direction:column; height:100vh; }
 
-    /* 顶部状态栏 */
+    /* === 顶部状态栏 === */
     .topbar {
       display:flex; align-items:center; justify-content:space-between;
-      padding:0 16px; height:44px; min-height:44px;
+      padding:0 16px; height:var(--topbar-h); min-height:var(--topbar-h);
       background:var(--bg-secondary); border-bottom:1px solid var(--border-color);
+      flex-shrink:0;
     }
     .topbar-left { display:flex; align-items:center; gap:10px; }
     .logo { display:flex; align-items:center; gap:8px; }
@@ -74,82 +67,135 @@
     .conn-badge.connected { background:var(--green-dim); color:var(--green); border-color:rgba(63,185,80,.3); }
     .conn-dot { width:7px; height:7px; border-radius:50%; background:var(--text-muted); transition:all .3s; }
     .conn-badge.connected .conn-dot { background:var(--green); box-shadow:0 0 6px var(--green-glow); }
-    .topbar-right { display:flex; gap:8px; }
-    .btn {
-      padding:5px 12px; border-radius:6px; border:1px solid var(--border-color);
+
+    /* 布局切换按钮组 */
+    .layout-btns { display:flex; gap:4px; }
+    .layout-btn {
+      display:flex; align-items:center; justify-content:center;
+      width:30px; height:26px; border-radius:5px; border:1px solid var(--border-color);
+      background:var(--bg-tertiary); color:var(--text-muted); cursor:pointer;
+      font-size:11px; font-family:var(--font); transition:all .2s;
+      position:relative;
+    }
+    .layout-btn:hover { background:var(--bg-hover); color:var(--text-secondary); border-color:var(--text-muted); }
+    .layout-btn.active { background:var(--accent-dim); color:var(--accent); border-color:var(--accent-glow); }
+    /* 新建按钮 */
+    .btn-new {
+      padding:4px 10px; border-radius:6px; border:1px solid var(--border-color);
       background:var(--bg-tertiary); color:var(--text-secondary); cursor:pointer;
-      font-size:12px; font-family:var(--font); transition:all .2s;
+      font-size:12px; font-family:var(--font); transition:all .2s; margin-left:8px;
     }
-    .btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
-    .btn:active { transform:scale(.97); }
+    .btn-new:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .btn-new:active { transform:scale(.97); }
+    .topbar-right { display:flex; align-items:center; gap:0; }
 
-    /* 主体区域（左右分栏） */
-    .main { display:flex; flex:1; overflow:hidden; }
-
-    /* 左侧对话面板/会话面板（包含边框） */
-    .chat-panel {
-      width:320px; min-width:320px;
-      display:flex; flex-direction:column;
-      background:var(--bg-secondary); border-right:1px solid var(--border-color);
+    /* === 顶部 Tabs 栏 === */
+    .tabs-bar {
+      display:flex; align-items:center;
+      height:var(--tabsbar-h); min-height:var(--tabsbar-h);
+      background:var(--bg-secondary); border-bottom:1px solid var(--border-color);
+      padding:0 12px; gap:2px; overflow-x:auto; overflow-y:hidden;
+      flex-shrink:0;
     }
+    .tabs-bar::-webkit-scrollbar { height:3px; }
 
-    /* 左侧边栏：会话列表 */
-    .session-panel {
-      flex: 1; display:flex; flex-direction:column; overflow:hidden;
+    /* Tab 单项 */
+    .tab-item {
+      display:flex; align-items:center; gap:6px;
+      padding:5px 12px; border-radius:6px 6px 0 0;
+      font-size:12px; font-weight:500; cursor:pointer; user-select:none;
+      color:var(--text-muted); border:1px solid transparent; border-bottom:none;
+      transition:all .15s; white-space:nowrap; flex-shrink:0;
+      position:relative;
     }
-    .session-panel-header {
-      padding:12px 16px; font-size:12px; font-weight:600;
-      text-transform:uppercase; letter-spacing:.5px; color:var(--text-muted);
-      display:flex; justify-content:space-between; align-items:center;
-      border-bottom: 1px solid var(--border-color);
+    .tab-item:hover { background:var(--bg-hover); color:var(--text-secondary); }
+    /* 在某个格子里展示时，高亮该 Tab（但不是 active-slot）*/
+    .tab-item.in-slot { color:var(--text-secondary); border-color:var(--border-color); background:var(--bg-tertiary); }
+    /* 当前激活格子的 Tab */
+    .tab-item.in-slot.focused {
+      background:var(--accent-dim); color:var(--accent);
+      border-color:var(--accent-glow); border-bottom:1px solid var(--bg-primary);
     }
-    .session-list { overflow-y:auto; padding:0 8px 8px; }
-    .session-item {
-      display:flex; align-items:flex-start; justify-content:space-between;
-      padding:8px 10px; border-radius:6px; cursor:pointer; margin-top: 4px;
-      font-size:12px; color:var(--text-secondary); transition:all .15s;
+    .tab-dot {
+      width:6px; height:6px; border-radius:50%;
+      background:var(--text-muted); flex-shrink:0; transition:all .2s;
     }
-    .session-item:hover { background:var(--bg-hover); }
-    .session-item.active { background:var(--accent-dim); box-shadow:0 0 0 1px var(--accent-glow); }
-
-    .session-info { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 4px; padding-right: 6px; }
-    .session-main { display: flex; align-items: center; gap: 6px; }
-    .session-name { font-size: 13px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
-    .edit-name-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; opacity: 0; font-size: 11px; padding: 0 2px; }
-    .session-item:hover .edit-name-btn { opacity: 1; }
-    .edit-name-btn:hover { color: var(--accent); }
-
-    .session-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
-    .session-time { white-space: nowrap; background: rgba(0,0,0,0.2); padding: 1px 4px; border-radius: 4px; }
-    .session-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; direction: rtl; text-align: left; }
-
-    .session-close-btn {
+    .tab-item.in-slot .tab-dot { background:var(--green); box-shadow:0 0 5px var(--green-glow); }
+    .tab-item.in-slot.focused .tab-dot { background:var(--accent); box-shadow:0 0 5px var(--accent-glow); }
+    .tab-name { max-width:100px; overflow:hidden; text-overflow:ellipsis; }
+    .tab-slot-badge {
+      font-size:9px; color:var(--text-muted); background:var(--bg-hover);
+      border-radius:3px; padding:1px 4px; opacity:0.7;
+    }
+    .tab-item.in-slot.focused .tab-slot-badge { color:var(--accent); background:var(--accent-dim); opacity:1; }
+    .tab-close {
       background:none; border:none; color:var(--text-muted); cursor:pointer;
-      font-size:16px; padding:0 4px; opacity:0; transition:all .15s; margin-top: -2px;
+      font-size:14px; padding:0 1px; opacity:0; transition:opacity .15s;
+      line-height:1;
     }
-    .session-item:hover .session-close-btn { opacity:1; }
-    .session-close-btn:hover { color:var(--red); transform: scale(1.1); }
+    .tab-item:hover .tab-close { opacity:1; }
+    .tab-close:hover { color:var(--red); }
 
-    /* 右侧终端区域 */
-    .terminal-panel { flex:1; display:flex; flex-direction:column; overflow:hidden; position:relative; }
-    .terminal-container { flex:1; position:relative; }
-    .terminal-instance { position:absolute; inset:0; padding:8px; }
-    .terminal-instance.hidden { display:none; }
+    /* === 终端主区域 === */
+    .terminal-panel {
+      flex:1; display:grid; overflow:hidden;
+      gap:4px; padding:4px; background:var(--bg-primary);
+      transition:grid-template-columns .2s, grid-template-rows .2s;
+    }
+
+    /* 四种布局 */
+    .terminal-panel.layout-single {
+      grid-template-columns: 1fr;
+      grid-template-rows: 1fr;
+    }
+    .terminal-panel.layout-split-h {
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr;
+    }
+    .terminal-panel.layout-split-v {
+      grid-template-columns: 1fr;
+      grid-template-rows: 1fr 1fr;
+    }
+    .terminal-panel.layout-grid {
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+    }
+
+    /* 格子（Slot） */
+    .term-slot {
+      position:relative; border-radius:6px; overflow:hidden;
+      border:1px solid var(--border-color); background:var(--bg-primary);
+      transition:border-color .15s, box-shadow .15s;
+      cursor:pointer;
+    }
+    .term-slot.active-slot {
+      border-color:var(--accent-glow);
+      box-shadow:0 0 0 1px var(--accent-glow);
+    }
+
+    /* 格子内的终端实例 */
+    .terminal-instance { position:absolute; inset:0; padding:6px; }
     .terminal-instance .xterm { height:100%; }
 
-    .terminal-placeholder {
-      position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-      color:var(--text-muted); text-align:center;
+    /* 格子为空时的占位 */
+    .slot-placeholder {
+      position:absolute; inset:0; display:flex; flex-direction:column;
+      align-items:center; justify-content:center;
+      color:var(--text-muted); gap:8px;
     }
-    .terminal-placeholder.hidden { display:none; }
-    .placeholder-icon { font-size:42px; margin-bottom:12px; opacity:.5; }
-    .placeholder-title { font-size:16px; font-weight:600; color:var(--text-secondary); margin-bottom:6px; }
-    .placeholder-desc { font-size:12px; color:var(--text-muted); }
+    .slot-placeholder-icon { font-size:32px; opacity:.4; }
+    .slot-placeholder-text { font-size:12px; }
+    .slot-new-btn {
+      padding:6px 14px; border-radius:6px; border:1px dashed var(--border-color);
+      background:transparent; color:var(--text-muted); cursor:pointer;
+      font-size:12px; font-family:var(--font); transition:all .2s;
+    }
+    .slot-new-btn:hover { border-color:var(--accent); color:var(--accent); background:var(--accent-dim); }
 
-    /* 响应式 */
-    @media (max-width: 768px) {
-      .chat-panel { width:100%; min-width:unset; max-height:40vh; border-right:none; border-bottom:1px solid var(--border-color); }
-      .main { flex-direction:column; }
+    /* Tab 占位（没有会话时整体空态） */
+    .empty-tabs-hint {
+      display:flex; align-items:center; gap:6px;
+      font-size:12px; color:var(--text-muted); padding:0 8px;
     }
   </style>
 </head>
@@ -168,35 +214,25 @@
         </div>
       </div>
       <div class="topbar-right">
-        <!-- 移至左侧边栏 -->
+        <!-- 布局切换 -->
+        <div class="layout-btns" id="layoutBtns">
+          <button class="layout-btn active" data-layout="single" id="btnLayoutSingle" title="单终端">▣</button>
+          <button class="layout-btn" data-layout="split-h" id="btnLayoutSplitH" title="左右分屏">⬛▐</button>
+          <button class="layout-btn" data-layout="split-v" id="btnLayoutSplitV" title="上下分屏">▬</button>
+          <button class="layout-btn" data-layout="grid" id="btnLayoutGrid" title="四格布局">⊞</button>
+        </div>
+        <button class="btn-new" id="btnNewSession" title="新建终端会话">＋ 新建</button>
       </div>
     </div>
 
-    <!-- 主体区域 -->
-    <div class="main">
-      <!-- 左侧边栏 -->
-      <div class="chat-panel">
-        <div class="session-panel">
-          <div class="session-panel-header">
-            <span>📋 会话列表</span>
-            <button class="btn" id="btnNewSession" title="新建终端会话" style="padding: 2px 8px; font-size: 11px; font-weight: 500;">+ 新建</button>
-          </div>
-          <div class="session-list" id="sessionList"></div>
-        </div>
-      </div>
+    <!-- 顶部 Tabs 栏 -->
+    <div class="tabs-bar" id="tabsBar">
+      <span class="empty-tabs-hint" id="emptyTabsHint">☁️ 暂无会话，点击「新建」创建终端</span>
+    </div>
 
-      <!-- 右侧终端 -->
-      <div class="terminal-panel">
-        <div class="terminal-container" id="terminalContainer">
-          <div class="terminal-placeholder" id="termPlaceholder">
-            <div>
-              <div class="placeholder-icon">⌨️</div>
-              <div class="placeholder-title">等待终端连接</div>
-              <div class="placeholder-desc">本地应用连接后，终端将自动显示</div>
-            </div>
-          </div>
-        </div>
-      </div>
+    <!-- 终端区域（多格） -->
+    <div class="terminal-panel layout-single" id="terminalPanel">
+      <!-- 格子由 JS 动态生成 -->
     </div>
   </div>
 
@@ -206,91 +242,84 @@
   (function() {
     'use strict';
 
-    // ---- 状态 ----
+    // ======= 状态 =======
     let ws = null;
-    const sessions = new Map(); // sessionId → { terminal, fitAddon, el }
-    let activeSessionId = null;
+    // sessions: Map<id, { terminal, fitAddon, el(xterm挂载el), cwd, shell, createdAt }>
+    const sessions = new Map();
 
-    // ---- DOM 引用 ----
-    const connBadge = document.getElementById('connBadge');
-    const connText = document.getElementById('connText');
-    const btnNewSession = document.getElementById('btnNewSession');
-    const sessionListEl = document.getElementById('sessionList');
-    const terminalContainer = document.getElementById('terminalContainer');
-    const termPlaceholder = document.getElementById('termPlaceholder');
+    // 布局类型：single | split-h | split-v | grid
+    let currentLayout = 'single';
+    // 每种布局下的格子数量
+    const LAYOUT_SLOT_COUNT = { single: 1, 'split-h': 2, 'split-v': 2, grid: 4 };
 
-    // ---- WebSocket 连接 ----
+    // slots: Array<string|null>，每个格子存放 sessionId（或 null）
+    let slots = [null];
+    // 当前"激活"的格子索引（布局切换时或点击格子时变化）
+    let activeSlotIdx = 0;
+
+    // ======= DOM =======
+    const connBadge    = document.getElementById('connBadge');
+    const connText     = document.getElementById('connText');
+    const btnNewSession= document.getElementById('btnNewSession');
+    const tabsBar      = document.getElementById('tabsBar');
+    const emptyHint    = document.getElementById('emptyTabsHint');
+    const terminalPanel= document.getElementById('terminalPanel');
+    const layoutBtns   = document.querySelectorAll('.layout-btn');
+
+    // ======= WebSocket =======
     function connectWS() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const token = document.cookie.match(/token=([^;]+)/)?.[1] || '';
       ws = new WebSocket(proto + '://' + location.host + '/ws/ui?token=' + token);
-
-      ws.onopen = () => console.log('[WS] 已连接中继');
-
-      ws.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        handleMessage(msg);
-      };
-
-      ws.onclose = () => {
-        console.log('[WS] 断开，3秒后重连...');
-        setTimeout(connectWS, 3000);
-      };
-
+      ws.onopen  = () => console.log('[WS] 已连接中继');
+      ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
+      ws.onclose = () => { console.log('[WS] 断开，3秒后重连...'); setTimeout(connectWS, 3000); };
       ws.onerror = () => {};
     }
 
-    // ---- 消息处理 ----
+    // ======= 消息处理 =======
     function handleMessage(msg) {
       switch (msg.type) {
         case 'init':
           updateConnectionStatus(msg.terminalConnected, msg.computer_name);
           break;
-
         case 'terminal_connected':
           updateConnectionStatus(true, msg.computer_name);
           break;
-
         case 'terminal_disconnected':
           updateConnectionStatus(false);
           break;
-
-        case 'chat':
-          // 聊天功能已被移除前端界面
-          break;
-
         case 'session_created':
           addSession(msg.sessionId, msg.cwd, msg.shell, msg.createdAt);
-          switchSession(msg.sessionId);
+          // 自动放入当前激活格子
+          assignToActiveSlot(msg.sessionId);
           break;
-
         case 'output': {
           const s = sessions.get(msg.sessionId);
           if (s && s.terminal) s.terminal.write(msg.data);
           break;
         }
-
         case 'session_closed':
         case 'session_exit':
           removeSession(msg.sessionId);
           break;
-
         case 'session_list':
           if (msg.sessions) {
             msg.sessions.forEach(s => {
               if (!sessions.has(s.id)) addSession(s.id, s.cwd, s.shell, s.createdAt);
             });
-            if (msg.sessions.length > 0 && !activeSessionId) switchSession(msg.sessions[0].id);
+            // 将已有会话依次填入格子
+            fillSlotsFromExisting();
+            renderAll();
           }
           break;
-
         case 'error':
           console.error('⚠️ ' + msg.message);
           break;
       }
     }
 
-    // ---- 连接状态 ----
+    // ======= 连接状态 =======
     function updateConnectionStatus(connected, computerName) {
       if (connected) {
         connBadge.classList.add('connected');
@@ -303,13 +332,20 @@
       }
     }
 
-    // ---- 终端会话 ----
+    // ======= 终端会话管理 =======
     function addSession(id, cwd, shell, createdAtRemote) {
       if (sessions.has(id)) return;
 
+      // 创建 xterm 容器 div（先不挂载到 slot）
+      const mountEl = document.createElement('div');
+      mountEl.className = 'terminal-instance';
+      mountEl.id = 'term-' + id;
+      // 暂存到 body 不可见区域
+      mountEl.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;width:600px;height:400px;';
+      document.body.appendChild(mountEl);
+
       const terminal = new Terminal({
-        cursorBlink: true,
-        fontSize: 14,
+        cursorBlink: true, fontSize: 14,
         fontFamily: "'Cascadia Code','Fira Code','JetBrains Mono','Consolas',monospace",
         theme: {
           background: '#0d1117', foreground: '#e6edf3', cursor: '#58a6ff',
@@ -321,151 +357,248 @@
           brightCyan: '#56d364', brightWhite: '#f0f6fc'
         }
       });
-
       const fitAddon = new FitAddon.FitAddon();
       terminal.loadAddon(fitAddon);
+      terminal.open(mountEl);
 
-      const el = document.createElement('div');
-      el.className = 'terminal-instance hidden';
-      el.id = 'term-' + id;
-      terminalContainer.appendChild(el);
-      terminal.open(el);
-
-      // 终端输入 → 发送到中继
       terminal.onData((data) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'input', sessionId: id, data: data }));
-        }
+        if (ws && ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ type: 'input', sessionId: id, data }));
       });
-
-      // 尺寸变化
       terminal.onResize(({ cols, rows }) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (ws && ws.readyState === WebSocket.OPEN)
           ws.send(JSON.stringify({ type: 'resize', sessionId: id, cols, rows }));
-        }
       });
 
-      // 持久化时间和名字缓存逻辑依赖机制
       let cTime = localStorage.getItem('termTime_' + id);
       if (!cTime) {
         cTime = createdAtRemote || Date.now();
         localStorage.setItem('termTime_' + id, cTime);
       }
 
-      sessions.set(id, { terminal, fitAddon, el, cwd, shell, createdAt: parseInt(cTime) });
-      renderSessionList();
+      sessions.set(id, { terminal, fitAddon, mountEl, cwd, shell, createdAt: parseInt(cTime) });
     }
 
     function removeSession(id) {
       const s = sessions.get(id);
-      if (s) { s.terminal.dispose(); s.el.remove(); sessions.delete(id); }
-      
+      if (s) {
+        s.terminal.dispose();
+        s.mountEl.remove();
+        sessions.delete(id);
+      }
       localStorage.removeItem('termName_' + id);
       localStorage.removeItem('termTime_' + id);
-
-      if (activeSessionId === id) {
-        activeSessionId = null;
-        const remaining = Array.from(sessions.keys());
-        if (remaining.length > 0) switchSession(remaining[0]);
-        else termPlaceholder.classList.remove('hidden');
-      }
-      renderSessionList();
+      // 从格子中移除
+      slots = slots.map(sid => sid === id ? null : sid);
+      renderAll();
     }
 
-    function switchSession(id) {
-      if (activeSessionId) {
-        const old = sessions.get(activeSessionId);
-        if (old) old.el.classList.add('hidden');
-      }
-      const s = sessions.get(id);
+    // ======= 格子（Slot）管理 =======
+
+    /** 将 sessionId 放入当前激活格子 */
+    function assignToActiveSlot(sessionId) {
+      slots[activeSlotIdx] = sessionId;
+      renderAll();
+      // 让该格子对应的终端获得焦点
+      const s = sessions.get(sessionId);
       if (s) {
-        termPlaceholder.classList.add('hidden');
-        s.el.classList.remove('hidden');
-        s.fitAddon.fit();
-        s.terminal.focus();
-        activeSessionId = id;
+        setTimeout(() => { s.fitAddon.fit(); s.terminal.focus(); }, 50);
       }
-      renderSessionList();
     }
 
-    function renderSessionList() {
-      sessionListEl.innerHTML = '';
-      for (const [id, s] of sessions) {
-        const item = document.createElement('div');
-        item.className = 'session-item' + (id === activeSessionId ? ' active' : '');
-        
-        const fullCwd = s.cwd || '~';
-        const shortCwd = s.cwd ? s.cwd.replace(/^.*[\\\\/]/, '') || s.cwd : '~';
-        const cName = localStorage.getItem('termName_' + id) || shortCwd;
-        
-        const t = new Date(s.createdAt);
-        const timeStr = t.getHours().toString().padStart(2, '0') + ':' + t.getMinutes().toString().padStart(2, '0');
+    /** 初始加载：已有会话依次填充格子 */
+    function fillSlotsFromExisting() {
+      const ids = Array.from(sessions.keys());
+      for (let i = 0; i < slots.length; i++) {
+        if (!slots[i] && ids.length > 0) slots[i] = ids.shift();
+      }
+    }
 
-        item.innerHTML = `
-          <div class="session-info">
-            <div class="session-main">
-              <span class="session-name" title="双击重新命名当前会话">${cName}</span>
-              <button class="edit-name-btn" data-id="${id}" title="修改名称">✎</button>
-            </div>
-            <div class="session-meta">
-              <span class="session-time">${timeStr}</span>
-              <span class="session-path" title="${fullCwd}">${fullCwd}</span>
-            </div>
-          </div>
-          <button class="session-close-btn" data-id="${id}" title="关闭会话">×</button>
+    /**
+     * 点击 Tab 的处理逻辑：
+     * - 如果该 sessionId 已在某格中显示 → 激活那个格子
+     * - 否则 → 替换当前激活格子
+     */
+    function onTabClick(sessionId) {
+      const existingIdx = slots.indexOf(sessionId);
+      if (existingIdx !== -1) {
+        // 已在某格，激活那个格子
+        setActiveSlot(existingIdx);
+      } else {
+        // 替换当前激活格子
+        slots[activeSlotIdx] = sessionId;
+        renderAll();
+        const s = sessions.get(sessionId);
+        if (s) setTimeout(() => { s.fitAddon.fit(); s.terminal.focus(); }, 50);
+      }
+    }
+
+    function setActiveSlot(idx) {
+      activeSlotIdx = idx;
+      // 更新格子激活状态
+      document.querySelectorAll('.term-slot').forEach((el, i) => {
+        el.classList.toggle('active-slot', i === idx);
+      });
+      renderTabs();
+      // 聚焦
+      const sid = slots[idx];
+      if (sid) {
+        const s = sessions.get(sid);
+        if (s) { s.fitAddon.fit(); s.terminal.focus(); }
+      }
+    }
+
+    // ======= 布局切换 =======
+    function setLayout(layout) {
+      currentLayout = layout;
+      const count = LAYOUT_SLOT_COUNT[layout];
+      // 补充或裁剪 slots 数组
+      while (slots.length < count) slots.push(null);
+      if (slots.length > count) slots = slots.slice(0, count);
+      // 激活格子不能超出范围
+      if (activeSlotIdx >= count) activeSlotIdx = count - 1;
+      // 更新面板 class
+      terminalPanel.className = 'terminal-panel layout-' + layout;
+      // 更新按钮状态
+      layoutBtns.forEach(btn => btn.classList.toggle('active', btn.dataset.layout === layout));
+      renderAll();
+    }
+
+    // ======= 渲染总入口 =======
+    function renderAll() {
+      renderSlots();
+      renderTabs();
+    }
+
+    /** 渲染格子区域 */
+    function renderSlots() {
+      const count = LAYOUT_SLOT_COUNT[currentLayout];
+      // 清空面板（但不销毁终端 DOM，它们在 body 临时区）
+      terminalPanel.innerHTML = '';
+
+      for (let i = 0; i < count; i++) {
+        const slotEl = document.createElement('div');
+        slotEl.className = 'term-slot' + (i === activeSlotIdx ? ' active-slot' : '');
+        slotEl.id = 'slot-' + i;
+
+        const sid = slots[i];
+        if (sid && sessions.has(sid)) {
+          // 将终端 mountEl 移动到格子中
+          const s = sessions.get(sid);
+          // 重置临时样式
+          s.mountEl.style.cssText = '';
+          slotEl.appendChild(s.mountEl);
+          // 异步 fit
+          setTimeout(() => { try { s.fitAddon.fit(); } catch(e){} }, 30);
+        } else {
+          // 空态占位
+          const ph = document.createElement('div');
+          ph.className = 'slot-placeholder';
+          ph.innerHTML = `
+            <div class="slot-placeholder-icon">⌨️</div>
+            <div class="slot-placeholder-text">此格子为空</div>
+            <button class="slot-new-btn" data-slot="${i}">＋ 新建终端</button>
+          `;
+          ph.querySelector('.slot-new-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            // 新建前先激活这个格子
+            activeSlotIdx = i;
+            if (ws && ws.readyState === WebSocket.OPEN)
+              ws.send(JSON.stringify({ type: 'create_session' }));
+          });
+          slotEl.appendChild(ph);
+        }
+
+        // 点击格子 → 激活
+        slotEl.addEventListener('click', () => setActiveSlot(i));
+
+        terminalPanel.appendChild(slotEl);
+      }
+    }
+
+    /** 渲染顶部 Tabs */
+    function renderTabs() {
+      tabsBar.innerHTML = '';
+      if (sessions.size === 0) {
+        tabsBar.appendChild(emptyHint);
+        return;
+      }
+
+      for (const [id, s] of sessions) {
+        const slotIdx = slots.indexOf(id);
+        const inSlot = slotIdx !== -1;
+        const isFocused = inSlot && slotIdx === activeSlotIdx;
+
+        const tab = document.createElement('div');
+        tab.className = 'tab-item' + (inSlot ? ' in-slot' : '') + (isFocused ? ' focused' : '');
+        tab.title = s.cwd || id;
+
+        const shortName = localStorage.getItem('termName_' + id)
+          || (s.cwd ? (s.cwd.replace(/^.*[\\/]/, '') || s.cwd) : 'Terminal');
+
+        // 格子编号徽章
+        const slotBadge = inSlot ? `<span class="tab-slot-badge">${slotIdx + 1}</span>` : '';
+
+        tab.innerHTML = `
+          <span class="tab-dot"></span>
+          <span class="tab-name" title="${shortName}">${shortName}</span>
+          ${slotBadge}
+          <button class="tab-close" data-id="${id}" title="关闭会话">×</button>
         `;
 
-        item.addEventListener('click', (e) => {
-          if (e.target.closest('.session-close-btn') || e.target.closest('.edit-name-btn')) return;
-          switchSession(id);
+        tab.addEventListener('click', (e) => {
+          if (e.target.closest('.tab-close')) return;
+          onTabClick(id);
         });
-
-        // 修改名称
-        const btnEdit = item.querySelector('.edit-name-btn');
-        btnEdit.addEventListener('click', (e) => {
+        tab.querySelector('.tab-close').addEventListener('click', (e) => {
           e.stopPropagation();
-          const p = prompt('请输入会话名称（为空则恢复默认）:', cName);
-          if (p !== null) {
-            const val = p.trim();
-            if (val) localStorage.setItem('termName_' + id, val);
-            else localStorage.removeItem('termName_' + id);
-            renderSessionList();
-          }
-        });
-
-        // 允许双击名字直接修改
-        item.querySelector('.session-name').addEventListener('dblclick', (e) => {
-          e.stopPropagation();
-          btnEdit.click();
-        });
-
-        // 关闭指令
-        item.querySelector('.session-close-btn').addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (ws && ws.readyState === WebSocket.OPEN) {
+          if (ws && ws.readyState === WebSocket.OPEN)
             ws.send(JSON.stringify({ type: 'close_session', sessionId: id }));
+        });
+
+        // 双击重命名
+        tab.querySelector('.tab-name').addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          const cur = localStorage.getItem('termName_' + id) || shortName;
+          const p = prompt('请输入会话名称（为空则恢复默认）:', cur);
+          if (p !== null) {
+            if (p.trim()) localStorage.setItem('termName_' + id, p.trim());
+            else localStorage.removeItem('termName_' + id);
+            renderTabs();
           }
         });
-        sessionListEl.appendChild(item);
+
+        tabsBar.appendChild(tab);
       }
     }
 
-    // 新建会话
+    // ======= 新建会话 =======
     btnNewSession.addEventListener('click', () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'create_session' }));
-      }
     });
 
-    // 窗口大小变化
+    // ======= 布局按钮 =======
+    document.getElementById('layoutBtns').addEventListener('click', (e) => {
+      const btn = e.target.closest('.layout-btn');
+      if (!btn) return;
+      setLayout(btn.dataset.layout);
+    });
+
+    // ======= 窗口 Resize =======
     window.addEventListener('resize', () => {
-      if (activeSessionId) {
-        const s = sessions.get(activeSessionId);
-        if (s && s.fitAddon) s.fitAddon.fit();
-      }
+      slots.forEach(sid => {
+        if (sid) {
+          const s = sessions.get(sid);
+          if (s) try { s.fitAddon.fit(); } catch(e){}
+        }
+      });
     });
 
-    // ---- 启动 ----
+    // ======= 初始化布局 =======
+    setLayout('single');
+
+    // ======= 启动 WebSocket =======
     connectWS();
   })();
   </script>
