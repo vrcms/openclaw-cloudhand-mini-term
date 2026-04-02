@@ -172,6 +172,12 @@
       border-color:var(--accent-glow);
       box-shadow:0 0 0 1px var(--accent-glow);
     }
+    /* 拖拽时的提示效果 */
+    .term-slot.drag-over {
+      border-color: var(--green);
+      box-shadow: 0 0 12px var(--green-glow);
+      background: var(--bg-hover);
+    }
 
     /* 格子内的终端实例 */
     .terminal-instance { position:absolute; inset:0; padding:6px; }
@@ -512,6 +518,29 @@
         // 点击格子 → 激活
         slotEl.addEventListener('click', () => setActiveSlot(i));
 
+        // --- 拖拽处理 ---
+        slotEl.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          slotEl.classList.add('drag-over');
+        });
+        slotEl.addEventListener('dragleave', () => {
+          slotEl.classList.remove('drag-over');
+        });
+        slotEl.addEventListener('drop', (e) => {
+          e.preventDefault();
+          slotEl.classList.remove('drag-over');
+          const sid = e.dataTransfer.getData('sessionId');
+          if (sid && sessions.has(sid)) {
+            // 将该会话放入此格子
+            slots[i] = sid;
+            activeSlotIdx = i; // 同时激活此格子
+            renderAll();
+            // 聚焦
+            const s = sessions.get(sid);
+            if (s) setTimeout(() => { s.fitAddon.fit(); s.terminal.focus(); }, 30);
+          }
+        });
+
         terminalPanel.appendChild(slotEl);
       }
     }
@@ -532,6 +561,7 @@
         const tab = document.createElement('div');
         tab.className = 'tab-item' + (inSlot ? ' in-slot' : '') + (isFocused ? ' focused' : '');
         tab.title = s.cwd || id;
+        tab.draggable = true; // 启用拖拽
 
         const shortName = localStorage.getItem('termName_' + id)
           || (s.cwd ? (s.cwd.replace(/^.*[\\/]/, '') || s.cwd) : 'Terminal');
@@ -545,6 +575,16 @@
           ${slotBadge}
           <button class="tab-close" data-id="${id}" title="关闭会话">×</button>
         `;
+
+        // --- 拖拽事件 ---
+        tab.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('sessionId', id);
+          e.dataTransfer.effectAllowed = 'move';
+          tab.classList.add('dragging');
+        });
+        tab.addEventListener('dragend', () => {
+          tab.classList.remove('dragging');
+        });
 
         tab.addEventListener('click', (e) => {
           if (e.target.closest('.tab-close')) return;
