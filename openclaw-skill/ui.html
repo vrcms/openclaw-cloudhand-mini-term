@@ -203,6 +203,81 @@
       display:flex; align-items:center; gap:6px;
       font-size:12px; color:var(--text-muted); padding:0 8px;
     }
+
+    /* === Agent 面板按钮 === */
+    .btn-agent {
+      padding:4px 10px; border-radius:6px; border:1px solid var(--border-color);
+      background:var(--bg-tertiary); color:var(--text-secondary); cursor:pointer;
+      font-size:12px; font-family:var(--font); transition:all .2s; margin-left:4px;
+    }
+    .btn-agent:hover { background:var(--purple); color:#fff; border-color:var(--purple); }
+    .btn-agent.active { background:rgba(188,140,255,.15); color:var(--purple); border-color:rgba(188,140,255,.3); }
+
+    /* === Agent 抽屉面板 === */
+    .agent-drawer {
+      position:fixed; top:0; right:-400px; width:400px; height:100vh;
+      background:var(--bg-secondary); border-left:1px solid var(--border-color);
+      z-index:1000; display:flex; flex-direction:column;
+      transition:right .3s cubic-bezier(.4,0,.2,1);
+      box-shadow:-4px 0 24px rgba(0,0,0,.4);
+    }
+    .agent-drawer.open { right:0; }
+    .agent-drawer-header {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:12px 16px; border-bottom:1px solid var(--border-color);
+      flex-shrink:0;
+    }
+    .agent-drawer-title { font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px; }
+    .agent-status-dot {
+      width:8px; height:8px; border-radius:50%; display:inline-block;
+    }
+    .agent-status-dot.offline { background:var(--text-muted); }
+    .agent-status-dot.idle { background:var(--green); box-shadow:0 0 6px var(--green-glow); }
+    .agent-status-dot.busy { background:var(--yellow); box-shadow:0 0 6px rgba(210,153,34,.3); animation:pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+    .agent-drawer-close {
+      background:none; border:none; color:var(--text-muted); cursor:pointer;
+      font-size:18px; line-height:1; padding:4px;
+    }
+    .agent-drawer-close:hover { color:var(--text-primary); }
+    .agent-chat {
+      flex:1; overflow-y:auto; padding:12px 16px; display:flex;
+      flex-direction:column; gap:12px;
+    }
+    .agent-chat-empty {
+      flex:1; display:flex; align-items:center; justify-content:center;
+      color:var(--text-muted); font-size:13px; text-align:center;
+    }
+    .agent-msg {
+      max-width:90%; padding:10px 14px; border-radius:12px;
+      font-size:13px; line-height:1.5; word-break:break-word;
+      white-space:pre-wrap;
+    }
+    .agent-msg.openclaw {
+      align-self:flex-end;
+      background:var(--accent-dim); color:var(--accent);
+      border-bottom-right-radius:4px;
+    }
+    .agent-msg.claude {
+      align-self:flex-start;
+      background:var(--green-dim); color:var(--green);
+      border-bottom-left-radius:4px;
+    }
+    .agent-msg .msg-role {
+      font-size:10px; font-weight:600; text-transform:uppercase;
+      margin-bottom:4px; opacity:.7;
+    }
+    .agent-msg .msg-time {
+      font-size:10px; opacity:.5; margin-top:4px; text-align:right;
+    }
+    .agent-msg .msg-exit {
+      font-size:10px; opacity:.5; margin-top:2px;
+    }
+    .agent-drawer-overlay {
+      position:fixed; inset:0; background:rgba(0,0,0,.3);
+      z-index:999; display:none;
+    }
+    .agent-drawer-overlay.open { display:block; }
   </style>
 </head>
 <body>
@@ -228,6 +303,7 @@
           <button class="layout-btn" data-layout="grid" id="btnLayoutGrid" title="四格布局">⊞</button>
         </div>
         <button class="btn-new" id="btnNewSession" title="新建终端会话">＋ 新建</button>
+        <button class="btn-agent" id="btnAgent" title="查看 AI Agent 对话记录">🤖 Agent</button>
       </div>
     </div>
 
@@ -239,6 +315,23 @@
     <!-- 终端区域（多格） -->
     <div class="terminal-panel layout-single" id="terminalPanel">
       <!-- 格子由 JS 动态生成 -->
+    </div>
+  </div>
+
+  <!-- Agent 抽屉遮罩 -->
+  <div class="agent-drawer-overlay" id="agentOverlay"></div>
+  <!-- Agent 抽屉面板 -->
+  <div class="agent-drawer" id="agentDrawer">
+    <div class="agent-drawer-header">
+      <div class="agent-drawer-title">
+        <span class="agent-status-dot offline" id="agentStatusDot"></span>
+        <span>Agent 对话</span>
+        <span id="agentStatusText" style="font-size:11px;font-weight:400;color:var(--text-muted)">offline</span>
+      </div>
+      <button class="agent-drawer-close" id="agentDrawerClose">✕</button>
+    </div>
+    <div class="agent-chat" id="agentChat">
+      <div class="agent-chat-empty">🤖 暂无 AI-to-AI 对话记录<br>Agent 启动后将在此显示</div>
     </div>
   </div>
 
@@ -637,6 +730,77 @@
 
     // ======= 初始化布局 =======
     setLayout('single');
+
+    // ======= Agent 面板 =======
+    const btnAgent = document.getElementById('btnAgent');
+    const agentDrawer = document.getElementById('agentDrawer');
+    const agentOverlay = document.getElementById('agentOverlay');
+    const agentDrawerClose = document.getElementById('agentDrawerClose');
+    const agentChat = document.getElementById('agentChat');
+    const agentStatusDot = document.getElementById('agentStatusDot');
+    const agentStatusText = document.getElementById('agentStatusText');
+    let agentPollTimer = null;
+    let lastHistoryLen = 0;
+
+    function toggleAgentDrawer() {
+      const isOpen = agentDrawer.classList.toggle('open');
+      agentOverlay.classList.toggle('open', isOpen);
+      btnAgent.classList.toggle('active', isOpen);
+      if (isOpen) {
+        fetchAgentHistory();
+        agentPollTimer = setInterval(fetchAgentHistory, 3000);
+      } else {
+        if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
+      }
+    }
+
+    btnAgent.addEventListener('click', toggleAgentDrawer);
+    agentDrawerClose.addEventListener('click', toggleAgentDrawer);
+    agentOverlay.addEventListener('click', toggleAgentDrawer);
+
+    async function fetchAgentHistory() {
+      try {
+        const res = await fetch('/agent/history');
+        if (!res.ok) return;
+        const data = await res.json();
+
+        // 更新状态指示
+        const state = data.state || 'offline';
+        agentStatusDot.className = 'agent-status-dot ' + state;
+        agentStatusText.textContent = state;
+
+        // 更新聊天记录
+        const history = data.history || [];
+        if (history.length === 0) {
+          agentChat.innerHTML = '<div class="agent-chat-empty">🤖 暂无 AI-to-AI 对话记录<br>Agent 启动后将在此显示</div>';
+          lastHistoryLen = 0;
+          return;
+        }
+
+        // 仅在内容变化时重新渲染
+        if (history.length === lastHistoryLen) return;
+        lastHistoryLen = history.length;
+
+        agentChat.innerHTML = history.map(item => {
+          const isOpenClaw = item.role === 'openclaw';
+          const roleLabel = isOpenClaw ? 'OpenClaw' : 'Claude';
+          const cls = isOpenClaw ? 'openclaw' : 'claude';
+          const time = new Date(item.timestamp).toLocaleTimeString('zh-CN');
+          const exitInfo = item.exitCode !== undefined ? `<div class="msg-exit">exit: ${item.exitCode}</div>` : '';
+          // 截断过长消息
+          let content = item.message || '';
+          if (content.length > 2000) content = content.slice(0, 2000) + '\n... (已截断)';
+          // 转义 HTML
+          content = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          return `<div class="agent-msg ${cls}"><div class="msg-role">${roleLabel}</div>${content}${exitInfo}<div class="msg-time">${time}</div></div>`;
+        }).join('');
+
+        // 自动滚到底部
+        agentChat.scrollTop = agentChat.scrollHeight;
+      } catch (e) {
+        // 静默忽略（Agent 可能未启动）
+      }
+    }
 
     // ======= 启动 WebSocket =======
     connectWS();

@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
+const { spawn } = require('child_process');
 
 // ==================== 命令行参数解析 ====================
 
@@ -190,6 +191,141 @@ const server = http.createServer((req, res) => {
       uiClients: uiClients.size,
       registeredClients: clientRegistry.size
     });
+    return;
+  }
+
+  // ==================== Agent API 路由 ====================
+
+  // 所有 /agent/* 路由仅限本地访问
+  if (req.url.startsWith('/agent/')) {
+    if (!isLocalRequest(req)) {
+      return jsonResponse(res, 403, { error: 'Forbidden', message: 'Local access only' });
+    }
+
+    // POST /agent/start — 初始化 Agent 会话
+    if (req.method === 'POST' && req.url === '/agent/start') {
+      readBody(req, (body) => {
+        try {
+          const data = JSON.parse(body);
+          if (agent.state !== 'offline') {
+            return jsonResponse(res, 400, { ok: false, error: 'Agent 已在运行，请先 stop' });
+          }
+          agent.cwd = data.cwd || process.cwd();
+          agent.allowedTools = data.allowedTools || ['Read', 'Edit', 'Bash', 'Write'];
+          agent.state = 'idle';
+          agent.sessionId = null;
+          agent.history = [];
+          agent.totalTurns = 0;
+          agent.currentProcess = null;
+          console.log(`[Agent] ✅ 已初始化，工作目录: ${agent.cwd}`);
+          jsonResponse(res, 200, { ok: true, state: 'idle' });
+        } catch (e) {
+          jsonResponse(res, 400, { ok: false, error: '请求体 JSON 解析失败' });
+        }
+      });
+      return;
+    }
+
+    // POST /agent/send — 发送消息并等待 Claude 回复
+    if (req.method === 'POST' && req.url === '/agent/send') {
+      readBody(req, async (body) => {
+        try {
+          const data = JSON.parse(body);
+          const message = data.message;
+          if (!message) {
+            return jsonResponse(res, 400, { ok: false, error: '缺少 message 字段' });
+          }
+          if (agent.state === 'offline') {
+            return jsonResponse(res, 400, { ok: false, error: 'Agent 未启动，请先 start' });
+          }
+          if (agent.state === 'busy') {
+            return jsonResponse(res, 429, { ok: false, error: 'Agent 正忙，请等待上一轮完成' });
+          }
+
+          // 记录 OpenClaw 发送的消息
+          agent.history.push({ role: 'openclaw', message, timestamp: Date.now() });
+          agent.state = 'busy';
+
+          try {
+            const result = await agentQueryClaude(message);
+            agent.state = 'idle';
+            agent.totalTurns++;
+
+            // 记录 Claude 的回复
+            agent.history.push({
+              role: 'claude',
+              message: result.reply,
+              exitCode: result.exitCode,
+              timestamp: Date.now()
+            });
+
+            jsonResponse(res, 200, {
+              ok: result.exitCode === 0,
+              reply: result.reply,
+              sessionId: agent.sessionId,
+              exitCode: result.exitCode,
+              state: 'idle'
+            });
+          } catch (err) {
+            agent.state = 'idle';
+            agent.history.push({
+              role: 'claude',
+              message: '[ERROR] ' + err.message,
+              exitCode: -1,
+              timestamp: Date.now()
+            });
+            jsonResponse(res, 500, {
+              ok: false,
+              error: err.message,
+              exitCode: -1,
+              state: 'idle'
+            });
+          }
+        } catch (e) {
+          jsonResponse(res, 400, { ok: false, error: '请求体 JSON 解析失败' });
+        }
+      });
+      return;
+    }
+
+    // GET /agent/status — 查询状态
+    if (req.method === 'GET' && req.url === '/agent/status') {
+      jsonResponse(res, 200, {
+        state: agent.state,
+        sessionId: agent.sessionId,
+        cwd: agent.cwd,
+        totalTurns: agent.totalTurns
+      });
+      return;
+    }
+
+    // GET /agent/history — 获取对话历史
+    if (req.method === 'GET' && (req.url === '/agent/history' || req.url.startsWith('/agent/history?'))) {
+      jsonResponse(res, 200, {
+        ok: true,
+        history: agent.history,
+        state: agent.state,
+        sessionId: agent.sessionId
+      });
+      return;
+    }
+
+    // POST /agent/stop — 关闭会话
+    if (req.method === 'POST' && req.url === '/agent/stop') {
+      // 杀掉正在运行的子进程
+      if (agent.currentProcess) {
+        try { agent.currentProcess.kill('SIGTERM'); } catch (e) {}
+        agent.currentProcess = null;
+      }
+      agent.state = 'offline';
+      agent.sessionId = null;
+      console.log('[Agent] 🛑 会话已关闭');
+      jsonResponse(res, 200, { ok: true, state: 'offline' });
+      return;
+    }
+
+    // 未匹配的 /agent/ 路由
+    jsonResponse(res, 404, { error: 'Agent API not found' });
     return;
   }
 
@@ -408,6 +544,129 @@ function isLocalRequest(req) {
   // 严格只接受本机环回地址，不信任任何代理头
   const localAddrs = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
   return localAddrs.includes(remoteAddr);
+}
+
+// ==================== Agent 模块 ====================
+
+// Agent 状态（内存中维护，重启丢失）
+const agent = {
+  state: 'offline',      // offline | idle | busy
+  sessionId: null,       // Claude 会话 ID（用于 --resume 多轮上下文）
+  cwd: null,             // 工作目录
+  allowedTools: [],      // 允许的工具列表
+  history: [],           // 对话历史 [{ role, message, timestamp, exitCode? }]
+  totalTurns: 0,         // 总对话轮数
+  currentProcess: null   // 当前正在运行的子进程引用
+};
+
+/**
+ * 调用 claude -p 执行一轮对话
+ * @param {string} prompt - 用户提示
+ * @returns {Promise<{reply: string, exitCode: number}>}
+ */
+function agentQueryClaude(prompt) {
+  return new Promise((resolve, reject) => {
+    // 构建命令参数
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
+
+    // 多轮对话：用 --resume 恢复之前的会话上下文
+    if (agent.sessionId) {
+      args.push('--resume', agent.sessionId);
+    }
+
+    // 工具权限
+    if (agent.allowedTools && agent.allowedTools.length > 0) {
+      args.push('--allowedTools', agent.allowedTools.join(','));
+    }
+
+    console.log(`[Agent] 🚀 执行: claude ${args.join(' ').substring(0, 100)}...`);
+
+    const proc = spawn('claude', args, {
+      cwd: agent.cwd || process.cwd(),
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: true // Windows 下必须开启 shell: true 才能正确调用 npm/pnpm 安装的 .cmd/.ps1 脚本
+    });
+
+    agent.currentProcess = proc;
+    let stdoutBuffer = ''; // 用于累计数据块，处理可能的截断
+    let fullRawStdout = ''; // 完整原始输出日志
+    let stderr = '';
+    let extractedText = '';
+    let extractedSessionId = null;
+
+    proc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      fullRawStdout += text;
+      stdoutBuffer += text;
+      
+      // 循环处理，直到缓冲区中没有完整的换行符
+      let newlineIndex;
+      while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIndex).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        
+        if (!line) continue;
+
+        try {
+          const event = JSON.parse(line);
+          // console.log(`[Agent] <Event: ${event.type}>`);
+
+          // 提取 session_id（首次出现时保存）
+          if (event.session_id && !extractedSessionId) {
+            extractedSessionId = event.session_id;
+          }
+
+          // 提取助手文本内容 (stream-json 格式)
+          if (event.type === 'assistant' && event.message?.content) {
+            const parts = Array.isArray(event.message.content)
+              ? event.message.content
+              : [event.message.content];
+            for (const part of parts) {
+              if (typeof part === 'string') {
+                extractedText += part;
+              } else if (part.type === 'text' && part.text) {
+                extractedText += part.text;
+              }
+            }
+          }
+
+          // result 类型包含最终文本 (作为兜底)
+          if (event.type === 'result' && event.result) {
+            if (!extractedText) extractedText = event.result;
+            if (event.session_id) extractedSessionId = event.session_id;
+          }
+        } catch (e) {
+          // 非 JSON 行或残缺 JSON，忽略
+        }
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('close', (code) => {
+      agent.currentProcess = null;
+
+      // 更新 sessionId（用于后续多轮对话）
+      if (extractedSessionId) {
+        agent.sessionId = extractedSessionId;
+      }
+
+      // 提取回复：优先使用结构化解析的文本，若没有则用 stdout/stderr
+      const reply = extractedText || fullRawStdout || stderr || '(无输出)';
+      console.log(`[Agent] ✅ Claude 退出，code=${code}，回复长度=${reply.length}，sessionId=${agent.sessionId || 'N/A'}`);
+
+      resolve({ reply: reply.trim(), exitCode: code || 0 });
+    });
+
+    proc.on('error', (err) => {
+      agent.currentProcess = null;
+      console.error(`[Agent] ❌ 进程错误: ${err.message}`);
+      reject(new Error('Claude CLI 启动失败: ' + err.message));
+    });
+  });
 }
 
 // ==================== 启动 ====================

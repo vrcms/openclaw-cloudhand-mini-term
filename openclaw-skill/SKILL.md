@@ -65,3 +65,114 @@ curl http://127.0.0.1:<端口>/api/clients
 - **首页安全防护**：访问中继网页无 Token 时，只显示"请从本机启动"的提示页
 - **多机隔离**：每台机器的终端会话互不可见，Web UI 通过 Token 路由到对应机器
 - **自动清理**：中继每 10 分钟清理超过 1 小时未连接的机器注册记录
+
+## 第五步：AI 自动控制协议（Agent Driver）
+
+你（OpenClaw AI）可以**直接通过命令行脚本**控制用户的远程机器，无需打开浏览器。
+
+### 获取目标机器 Token
+
+先查询在线机器，找到 `connected: true` 的目标：
+```bash
+curl http://127.0.0.1:<端口>/api/clients
+```
+
+然后从 `clients.json` 读取对应机器的 Token：
+```bash
+cat {baseDir}/clients.json
+```
+
+### 执行单条命令
+
+```bash
+node {baseDir}/ai-agent-driver.js --token <TOKEN> --cmd "<命令>"
+```
+
+参数说明：
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `--token`, `-t` | 是 | 目标机器的 Token |
+| `--cmd`, `-c` | 是 | 要执行的命令 |
+| `--port`, `-p` | 否 | 中继端口，默认 3456 |
+| `--timeout` | 否 | 超时秒数，默认 10 |
+
+### 示例
+
+```bash
+# 查看目标机器的文件列表
+node ai-agent-driver.js --token a02c4c46-xxx --cmd "dir C:\\"
+
+# 查看 Git 状态
+node ai-agent-driver.js --token a02c4c46-xxx --cmd "git status" --timeout 5
+
+# 执行一个较长的命令
+node ai-agent-driver.js --token a02c4c46-xxx --cmd "npm test" --timeout 60
+```
+
+### 输出格式
+
+- **stdout**：命令的纯文本输出（已自动剥离 ANSI 转义码/颜色）
+- **stderr**：驱动脚本自身的日志和错误信息
+- **退出码**：`0` = 成功，`1` = 失败（连接失败/终端未上线/超时）
+
+### 安全注意事项
+
+- Agent Driver **只能从中继服务器本机调用**（连接 `127.0.0.1`）
+- **不要在日志中暴露 Token**——Token 等同于该机器的完全控制权
+- 每次调用会创建一个临时 PTY 会话，命令执行完毕后自动关闭
+
+---
+
+## 第六步：Agent 对话协议（AI-to-AI 多轮对话）
+
+CloudHand 支持 OpenClaw 通过 HTTP API 与本地 Claude CLI 进行多轮对话。这是一个 **AI 对 AI** 的通信协议，OpenClaw 作为"老板"给 Claude 下达任务指令。
+
+### 原理
+
+使用 Claude CLI 的 `-p`（非交互模式）+ `--resume`（上下文串联）+ `--output-format stream-json`（结构化输出）。每次对话 spawn 一个新进程，进程退出即表示回答完成。
+
+### API 调用流程
+
+```
+1. POST /agent/start    → 初始化（设置工作目录、允许工具）
+2. POST /agent/send     → 发送消息，同步等待 Claude 回复（可能需要 30-120 秒）
+3. POST /agent/send     → 继续对话（自动带 --resume，Claude 能看到前续上下文）
+4. ...（可反复调用 send）
+5. POST /agent/stop     → 结束会话
+```
+
+#### 辅助 API
+- `GET /agent/status`  — 查看当前状态（offline/idle/busy）
+- `GET /agent/history` — 获取完整对话历史（用于 UI 面板排查）
+
+### 示例调用
+
+```bash
+# 初始化
+curl -X POST http://127.0.0.1:3456/agent/start \
+  -H "Content-Type: application/json" \
+  -d '{"cwd": "/path/to/project"}'
+
+# 第一轮对话
+curl -X POST http://127.0.0.1:3456/agent/send \
+  -H "Content-Type: application/json" \
+  -d '{"message": "分析这个项目的目录结构"}'
+
+# 第二轮（自动带上下文）
+curl -X POST http://127.0.0.1:3456/agent/send \
+  -H "Content-Type: application/json" \
+  -d '{"message": "现在优化 index.js 的性能"}'
+
+# 查看状态
+curl http://127.0.0.1:3456/agent/status
+
+# 结束
+curl -X POST http://127.0.0.1:3456/agent/stop
+```
+
+### 注意事项
+
+- 所有 `/agent/*` API **仅限 127.0.0.1 本地访问**
+- `POST /agent/send` 是同步阻塞调用，需要设置足够长的 HTTP 超时（建议 120 秒以上）
+- Agent 处于 `busy` 状态时，新的 `send` 请求会返回 `429 Too Many Requests`
+- `POST /agent/stop` 会清空 session_id，下次 start 后是全新对话
