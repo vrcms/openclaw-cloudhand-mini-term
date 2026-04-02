@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const EventEmitter = require('events');
+const { spawn } = require('child_process');
 
 /**
  * 中继客户端 — 主动连接到远程中继服务器，桥接本地 PTY 会话
@@ -19,6 +20,7 @@ class RelayClient extends EventEmitter {
     this.authenticated = false;
     this.reconnectTimer = null;
     this._destroyed = false;
+    this._agentProcess = null; // 当前正在运行的 Agent 进程 (Claude CLI)
 
     // 监听 PTY 事件，转发到中继服务器
     this._onOutput = ({ sessionId, data }) => this._send({ type: 'output', sessionId, data });
@@ -131,9 +133,111 @@ class RelayClient extends EventEmitter {
         case 'resize':
           this.sessionManager.resize(msg.sessionId, msg.cols, msg.rows);
           break;
+        case 'agent_query':
+          this._handleAgentQuery(msg);
+          break;
+        case 'agent_abort':
+          this._handleAgentAbort(msg);
+          break;
       }
     } catch (err) {
       this._send({ type: 'error', message: err.message });
+    }
+  }
+
+  // 处理来自中继的 Agent 任务
+  _handleAgentQuery(msg) {
+    const { requestId, message, sessionId, allowedTools, cwd } = msg;
+
+    // 如果已有进程在跑，先杀掉
+    if (this._agentProcess) {
+      this._handleAgentAbort();
+    }
+
+    const args = ['-p', message, '--output-format', 'stream-json', '--verbose'];
+    if (sessionId) args.push('--resume', sessionId);
+    if (allowedTools && allowedTools.length > 0) args.push('--allowedTools', allowedTools.join(','));
+
+    console.log(`[Agent] 🚀 本地执行: claude ${args.slice(0, 4).join(' ')}...`);
+
+    const proc = spawn('claude', args, {
+      cwd: cwd || process.cwd(),
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: true
+    });
+
+    this._agentProcess = proc;
+    proc.stdin.end();
+
+    let stdoutBuffer = '';
+    let fullRawStdout = '';
+    let stderr = '';
+    let extractedText = '';
+    let extractedSessionId = null;
+
+    proc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      fullRawStdout += text;
+      stdoutBuffer += text;
+
+      let newlineIndex;
+      while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIndex).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        if (!line) continue;
+
+        try {
+          const event = JSON.parse(line);
+          if (event.session_id && !extractedSessionId) extractedSessionId = event.session_id;
+
+          // 转发原始事件片段给中继 (用于 SSE 实时流)
+          this._send({ type: 'agent_stream', requestId, event });
+
+          // 提取文本
+          if (event.type === 'assistant' && event.message?.content) {
+            const parts = Array.isArray(event.message.content) ? event.message.content : [event.message.content];
+            for (const part of parts) {
+              if (typeof part === 'string') extractedText += part;
+              else if (part.type === 'text' && part.text) extractedText += part.text;
+            }
+          }
+          if (event.type === 'result' && event.result && !extractedText) extractedText = event.result;
+        } catch (e) {}
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+
+    proc.on('close', (code) => {
+      console.log(`[Agent] ✅ 进程结束 (code: ${code})`);
+      this._agentProcess = null;
+      this._send({
+        type: 'agent_result',
+        requestId,
+        reply: extractedText.trim() || fullRawStdout || stderr || '(执行完成，无输出)',
+        exitCode: code || 0,
+        sessionId: extractedSessionId
+      });
+    });
+
+    proc.on('error', (err) => {
+      this._agentProcess = null;
+      this._send({
+        type: 'agent_result',
+        requestId,
+        reply: `[ERROR] 启动失败: ${err.message}`,
+        exitCode: -1
+      });
+    });
+  }
+
+  // 中断当前 Agent 进程
+  _handleAgentAbort() {
+    if (this._agentProcess) {
+      console.log('[Agent] 🛑 中断执行');
+      try { this._agentProcess.kill(); } catch (e) {}
+      this._agentProcess = null;
     }
   }
 
@@ -147,6 +251,7 @@ class RelayClient extends EventEmitter {
   // 销毁连接
   destroy() {
     this._destroyed = true;
+    this._handleAgentAbort();
     clearTimeout(this.reconnectTimer);
     if (this.ws) this.ws.close();
 
