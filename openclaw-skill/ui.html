@@ -368,7 +368,8 @@
     // ======= WebSocket =======
     function connectWS() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const token = document.cookie.match(/token=([^;]+)/)?.[1] || '';
+      const urlToken = new URLSearchParams(window.location.search).get('token');
+      const token = urlToken || document.cookie.match(/token=([^;]+)/)?.[1] || '';
       ws = new WebSocket(proto + '://' + location.host + '/ws/ui?token=' + token);
       ws.onopen  = () => console.log('[WS] 已连接中继');
       ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
