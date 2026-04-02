@@ -245,11 +245,13 @@ const server = http.createServer((req, res) => {
           // 记录 OpenClaw 发送的消息
           agent.history.push({ role: 'openclaw', message, timestamp: Date.now() });
           agent.state = 'busy';
+          emitToStreamClients({ type: 'status', state: 'busy' }); // 通知所有 SSE 客户端进入 busy
 
           try {
             const result = await agentQueryClaude(message);
             agent.state = 'idle';
             agent.totalTurns++;
+            emitToStreamClients({ type: 'status', state: 'idle' }); // 通知所有 SSE 客户端回到 idle
 
             // 记录 Claude 的回复
             agent.history.push({
@@ -268,6 +270,7 @@ const server = http.createServer((req, res) => {
             });
           } catch (err) {
             agent.state = 'idle';
+            emitToStreamClients({ type: 'status', state: 'idle', error: err.message });
             agent.history.push({
               role: 'claude',
               message: '[ERROR] ' + err.message,
@@ -295,6 +298,24 @@ const server = http.createServer((req, res) => {
         sessionId: agent.sessionId,
         cwd: agent.cwd,
         totalTurns: agent.totalTurns
+      });
+      return;
+    }
+
+    // GET /agent/stream — SSE 实时事件流（只读，不触发任何操作）
+    if (req.method === 'GET' && req.url === '/agent/stream') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no' // 禁止 Nginx 缓冲，确保实时推送
+      });
+      // 立即推送当前状态快照
+      res.write(`data: ${JSON.stringify({ type: 'status', state: agent.state, sessionId: agent.sessionId })}\n\n`);
+      // 注册为订阅者
+      agent.streamClients.add(res);
+      req.on('close', () => {
+        agent.streamClients.delete(res);
       });
       return;
     }
@@ -556,8 +577,18 @@ const agent = {
   allowedTools: [],      // 允许的工具列表
   history: [],           // 对话历史 [{ role, message, timestamp, exitCode? }]
   totalTurns: 0,         // 总对话轮数
-  currentProcess: null   // 当前正在运行的子进程引用
+  currentProcess: null,  // 当前正在运行的子进程引用
+  streamClients: new Set() // SSE 流订阅客户端
 };
+
+// 向所有 SSE 流客户端推送事件
+function emitToStreamClients(event) {
+  if (agent.streamClients.size === 0) return;
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const res of agent.streamClients) {
+    try { res.write(payload); } catch (e) {}
+  }
+}
 
 /**
  * 调用 claude -p 执行一轮对话
@@ -589,6 +620,10 @@ function agentQueryClaude(prompt) {
     });
 
     agent.currentProcess = proc;
+    // 立即关闭 stdin：-p 模式是非交互的，不需要 stdin
+    // 不关闭会导致 Claude CLI 误判为"用户按了 Ctrl+C"，输出 "Request interrupted by user"
+    proc.stdin.end();
+
     let stdoutBuffer = ''; // 用于累计数据块，处理可能的截断
     let fullRawStdout = ''; // 完整原始输出日志
     let stderr = '';
@@ -599,18 +634,17 @@ function agentQueryClaude(prompt) {
       const text = chunk.toString();
       fullRawStdout += text;
       stdoutBuffer += text;
-      
+
       // 循环处理，直到缓冲区中没有完整的换行符
       let newlineIndex;
       while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
         const line = stdoutBuffer.slice(0, newlineIndex).trim();
         stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-        
+
         if (!line) continue;
 
         try {
           const event = JSON.parse(line);
-          // console.log(`[Agent] <Event: ${event.type}>`);
 
           // 提取 session_id（首次出现时保存）
           if (event.session_id && !extractedSessionId) {
@@ -625,8 +659,12 @@ function agentQueryClaude(prompt) {
             for (const part of parts) {
               if (typeof part === 'string') {
                 extractedText += part;
+                emitToStreamClients({ type: 'text', text: part }); // 实时推送文本片段
               } else if (part.type === 'text' && part.text) {
                 extractedText += part.text;
+                emitToStreamClients({ type: 'text', text: part.text }); // 实时推送文本片段
+              } else if (part.type === 'tool_use') {
+                emitToStreamClients({ type: 'tool_use', tool: part.name, input: part.input }); // 推送工具调用
               }
             }
           }
@@ -635,6 +673,7 @@ function agentQueryClaude(prompt) {
           if (event.type === 'result' && event.result) {
             if (!extractedText) extractedText = event.result;
             if (event.session_id) extractedSessionId = event.session_id;
+            emitToStreamClients({ type: 'result', text: event.result, exitCode: 0 });
           }
         } catch (e) {
           // 非 JSON 行或残缺 JSON，忽略
