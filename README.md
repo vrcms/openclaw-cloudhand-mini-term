@@ -1,74 +1,157 @@
-# CloudHand-Mini-Term (云手原生控制终端) v0.1.0
+# CloudHand-Mini-Term (云手原生控制终端)
 
 > [!CAUTION]
-> **安全警告：本项目的设计初衷是提供远程终端接入能力。使用本项目可能会使您的电脑终端通过中继服务器暴露在互联网中。请务必在受信任的网络环境下操作，并确保您的 Token 不被泄露。不当配置可能导致严重的系统安全风险，请谨慎操作。**
+> **安全警告：本项目可通过公网中继服务器远程访问你的本地终端。请确保 Token 不被泄露，并只在受信任的环境中部署中继服务器。**
 
-> **极致安全的远程跨网段终端解决方案**。彻底分离"控制面"与"执行面"，基于 Node.js 托盘应用实现，专为远程 AI 协作与运维设计。
+**极致安全的远程跨网段终端方案 + AI-to-AI 本地执行桥接**。本地托盘程序主动连接公网中继，实现零端口暴露的远程控制，并支持 OpenClaw AI 驱动本地 Claude CLI 进行 AI-to-AI 协作。
 
-## 💡 架构理念：非对称安全
+---
 
-CloudHand-Mini-Term 的核心是**两端分离**架构，确保即便中继服务器被攻击，本地系统的执行权限依然受到保护：
+## 💡 核心架构：非对称安全双端分离
 
-1.  **公网桥接端 (Relay Server)**：部署在公网服务器上。它仅作为"流量中转桥"，不具备任何 PTY 执行能力。采用"首来即信任"的 Token 注册机制，支持多台机器同时接入。
-2.  **本地守护端 (Tray App)**：部署在物理机上。它以 Windows 系统托盘形式静默运行，主动向中继端发起连接。首次启动自动生成 UUID Token 作为永久身份凭证。
+```
+OpenClaw (公网 AI 智能体)
+    │
+    │  HTTP API (127.0.0.1 only)
+    ▼
+┌─────────────────────────────────┐
+│  relay-server.js (公网中继服务器) │  ← 纯路由，无任何执行能力
+│  提供: Web UI / WS 中转 / Agent API│
+└────────────────┬────────────────┘
+                 │ WebSocket (WS)
+                 ▼
+┌─────────────────────────────────┐
+│  tray-app.js (本地托盘守护程序)  │  ← 只需要出站连接，无公网端口
+│  relay-client.js (WS 客户端)    │
+│  session-manager.js (PTY 管理器) │
+└────────────────┬────────────────┘
+                 │ 本地 spawn
+                 ▼
+         Claude CLI / Shell
+        (运行在你的本地电脑上)
+```
+
+- **中继服务器**：部署在公网，只做消息路由，不执行任何命令。
+- **本地托盘程序**：静默运行，主动连接中继，本地 PTY 和 Claude CLI 均在此执行。
+
+---
 
 ## 🛡️ 安全特性
 
-- **🎨 现代交互 UI**：全新设计的顶部标签页（Tabs）管理，告别拥挤的侧边栏，支持双击重命名。
-- **⊞ 多格动态布局**：一键切换 1格、左右2格、上下2格、4格网格模式，支持多任务同步监控。
-- **🖱️ 智能拖拽分配**：支持将会话 Tab 直接拖拽到目标格子进行即时分配，交互直观高效。
-- **零暴露执行面**：本地电脑无需开启任何公网端口，完全通过主动出站长连接实现受控。
-- **持久化 Token 认证**：本地机器持有永久 UUID Token，启动后直接连接中继，无需人工配对。
-- **哑巴屏机制**：公网访问时，无有效 Token 的请求不会得到任何提示，粉碎暴力破解。
-- **多机隔离**：多台机器可同时连入同一中继，各自的终端会话完全隔离。
+| 特性 | 说明 |
+|------|------|
+| 零端口暴露 | 本地机器完全通过主动出站 WS 长连接实现受控，无需开放任何公网端口 |
+| Token 持久认证 | 首次启动自动生成 UUID Token，后续重连自动复用，无需手动配对 |
+| 首来即信任 | 中继自动接受新 Token 注册，多台机器同时接入，Token 级别完全隔离 |
+| Agent API 本地隔离 | 所有 `/agent/*` 接口**严格限制 127.0.0.1 访问**，公网无法触达 |
+| 哑巴屏机制 | 无效 Token 访问时不返回任何有效信息，粉碎暴力枚举 |
 
-## 🚀 部署与使用
+---
 
-### 第一步：启动公网中继器 (服务端)
-在你的公网服务器上：
+## 🚀 快速部署
+
+### 第一步：部署公网中继服务器
+
 ```bash
-cd openclaw-skill
+# 在你的公网服务器上
+git clone https://github.com/vrcms/openclaw-cloudhand-mini-term.git
+cd openclaw-cloudhand-mini-term/openclaw-skill
 npm install
-node relay-server.js --port=3456
+node relay-server.js --port 3456
 ```
 
-### 第二步：启动本地托盘机 (执行端)
-在你的本地电脑（需要被控制的那台）上：
+### 第二步：启动本地托盘程序
+
+在你想要被远程控制的本地电脑上：
+
 ```bash
 npm install
 npm run dev
 ```
-启动后，你会看到右下角出现 CloudHand 图标，并自动弹出**本地设置页面** (`http://127.0.0.1:9899`)。
+
+启动后，右下角会出现 CloudHand 托盘图标，并自动打开本地设置页（`http://127.0.0.1:9899`）。
 
 ### 第三步：连接中继
-1.  在设置页面填入**电脑名称**（可选，默认取系统主机名）。
-2.  填入你的**中继服务器地址**（如 `opc.example.com:3456`）。
-3.  点击 **"连接到中继服务器"**。
-4.  一旦显示 `🟢 已连通 (就绪)`，即可在浏览器中通过显示的链接访问终端。
 
-### 第四步：玩转布局 (NEW)
-1.  **新建会话**：点击顶部的 "+" 或格子内的 "＋ 新建" 开启多个终端。
-2.  **切换布局**：通过右上角的图标在单格、分屏、四宫格间自适应切换。
-3.  **重新分配**：直接拖拽顶部的 Tab 丢进你喜欢的格子里，或者点击 Tab 将会话调度到当前活跃格子。
+在本地设置页中：
+1. 填入**中继服务器地址**（如 `opc.example.com:3456`）。
+2. 填入**电脑名称**（可选，默认取系统主机名）。
+3. 点击 **「连接到中继服务器」**。
+4. 显示 `🟢 已连通` 后，即可通过中继地址访问 Web 终端 UI。
 
-> 后续重启本地客户端后，会自动用已保存的 Token 恢复连接，无需任何操作。
+### 第四步：访问 Web 终端
 
-### 查看在线机器
-```bash
-curl http://中继地址:3456/api/clients
-# 返回: [{computer_name, connected, lastSeen}]
+浏览器打开：
 ```
+http://你的中继服务器地址:3456/?token=你的本地Token
+```
+
+---
+
+## 🤖 AI-to-AI Agent Driver
+
+OpenClaw 可通过中继的 HTTP API 控制本地 Claude CLI：
+
+```bash
+# 1. 初始化 Agent（指定目标机器的 Token）
+curl -X POST http://127.0.0.1:3456/agent/start \
+  -d '{"token": "<机器Token>", "cwd": "/path/to/project"}'
+
+# 2. 发送任务（Claude 在本地执行并回传结果）
+curl -X POST http://127.0.0.1:3456/agent/send \
+  --max-time 180 \
+  -d '{"message": "帮我重构一下 index.js"}'
+
+# 3. 实时监控 Claude 执行过程（SSE 流）
+curl -N http://127.0.0.1:3456/agent/stream
+
+# 4. 查看对话历史
+curl http://127.0.0.1:3456/agent/history
+
+# 5. 停止 Agent
+curl -X POST http://127.0.0.1:3456/agent/stop
+```
+
+> **注意**：Claude CLI 运行在**用户本地电脑**上，中继服务器只负责转发指令和结果。
+
+---
+
+## 🎨 Web UI 功能
+
+| 功能 | 说明 |
+|------|------|
+| 多格布局 | 支持 1格、左右2格、上下2格、4格网格，一键切换 |
+| Tab 管理 | 顶部 Tab 栏管理多个终端会话，支持双击重命名 |
+| 拖拽分配 | 将 Tab 拖到目标格子即可将会话分配到该格子 |
+| Agent 面板 | 右侧抽屉展示 AI-to-AI 对话记录，轮询实时更新 |
+
+---
 
 ## 📂 项目结构
 
-- `src/`：托盘端核心逻辑（Session 管理、WS 客户端）。
-- `openclaw-skill/`：中继端逻辑（HTTP/WS Server、Web UI）。
-- `contexts/`：项目核心上下文文档。
-- `settings.json`：持久化配置（Server 地址、Token、电脑名称）。
-
-## 📄 许可与依赖
-- **服务端**: `ws`, `express` (已精筒), `crypto`。
-- **托盘端**: `node-pty`, `systray2`, `clipboardy`。
+```
+openclaw-cloudhand-mini-term/
+├── server.js                    # 启动入口（加载 tray-app）
+├── settings.json                # 本地配置（relayHost, token, computer_name）
+├── src/
+│   ├── tray-app.js             # 系统托盘 UI + 本地控制服务（9899端口）
+│   ├── relay-client.js         # WS 客户端 + 本地 Claude CLI 执行驱动
+│   └── session-manager.js      # PTY 会话管理（基于 node-pty）
+└── openclaw-skill/
+    ├── relay-server.js          # 公网中继服务（HTTP + WS + Agent API）
+    ├── ui.html                  # Web 终端 UI（xterm.js）
+    ├── login.html               # 公网屏蔽页（哑巴屏）
+    ├── SKILL.md                 # OpenClaw 使用协议文档
+    └── clients.json             # 已注册机器持久化（自动维护）
+```
 
 ---
-*由 OpenClaw 设计，为黑客与 AI 开发者打造。*
+
+## 📄 依赖说明
+
+**本地端**：`node-pty`（PTY）、`systray2`（托盘）、`ws`（WS 客户端）、`open`、`clipboardy`  
+**中继端**：`ws`（WS 服务器）、Node.js 内置模块
+
+---
+
+*由 OpenClaw 设计，为 AI 协作与 DevOps 自动化打造。*
