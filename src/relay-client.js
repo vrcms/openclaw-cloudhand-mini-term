@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const EventEmitter = require('events');
-const { spawn } = require('child_process');
+const pty = require('node-pty');
+const { ClaudeTerminalCanvas, ClaudeOutputParser } = require('../ClaudeParserLib');
 
 /**
  * 中继客户端 — 主动连接到远程中继服务器，桥接本地 PTY 会话
@@ -20,7 +21,7 @@ class RelayClient extends EventEmitter {
     this.authenticated = false;
     this.reconnectTimer = null;
     this._destroyed = false;
-    this._agentProcess = null; // 当前正在运行的 Agent 进程 (Claude CLI)
+    this._agentDriver = null; // claude-driver PTY 实例
 
     // 监听 PTY 事件，转发到中继服务器
     this._onOutput = ({ sessionId, data }) => this._send({ type: 'output', sessionId, data });
@@ -133,11 +134,17 @@ class RelayClient extends EventEmitter {
         case 'resize':
           this.sessionManager.resize(msg.sessionId, msg.cols, msg.rows);
           break;
+        case 'agent_start':
+          this._handleAgentStart();
+          break;
         case 'agent_query':
           this._handleAgentQuery(msg);
           break;
-        case 'agent_abort':
-          this._handleAgentAbort(msg);
+        case 'agent_permission':
+          this._handleAgentPermission(msg);
+          break;
+        case 'agent_stop':
+          this._handleAgentStop();
           break;
       }
     } catch (err) {
@@ -145,99 +152,233 @@ class RelayClient extends EventEmitter {
     }
   }
 
-  // 处理来自中继的 Agent 任务
-  _handleAgentQuery(msg) {
-    const { requestId, message, sessionId, allowedTools, cwd } = msg;
+  // ==================== Agent PTY Driver ====================
 
-    // 如果已有进程在跑，先杀掉
-    if (this._agentProcess) {
-      this._handleAgentAbort();
+  // 启动 claude-driver PTY
+  _handleAgentStart() {
+    if (this._agentDriver) {
+      console.log('[Agent] ⚠️ driver 已存在，先销毁再重建');
+      this._handleAgentStop();
     }
 
-    const args = ['-p', message, '--output-format', 'stream-json', '--verbose'];
-    if (sessionId) args.push('--resume', sessionId);
-    if (allowedTools && allowedTools.length > 0) args.push('--allowedTools', allowedTools.join(','));
+    // node-pty 在 Windows 上无法直接 spawn .cmd 文件，需通过 cmd.exe /c
+    const CLAUDE_CMD = process.platform === 'win32' ? 'cmd.exe' : 'claude';
+    const CLAUDE_ARGS = process.platform === 'win32'
+      ? ['/c', 'claude', ...(process.env.CLAUDE_ARGS || '').split(',').filter(Boolean)]
+      : (process.env.CLAUDE_ARGS || '').split(',').filter(Boolean);
 
-    console.log(`[Agent] 🚀 本地执行: claude ${args.slice(0, 4).join(' ')}...`);
+    const PTY_COLS = 220;
+    const PTY_ROWS = 3000;
+    const IDLE_DEBOUNCE_MS = 1500;
+    const STARTING_DEBOUNCE_MS = 6000;
 
-    const proc = spawn('claude', args, {
-      cwd: cwd || process.cwd(),
-      env: { ...process.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true
+    const driver = {
+      ptyProc: null,
+      canvas: new ClaudeTerminalCanvas(PTY_COLS, PTY_ROWS),
+      state: 'STARTING',  // STARTING | IDLE | BUSY | WAITING_FOR_BUSY | _PERMISSION
+      idleTimer: null,
+      taskResolveFn: null,
+      taskRejectFn: null,
+      taskTimer: null,
+      currentRequestId: null  // 当前任务的 requestId
+    };
+
+    console.log('[Agent] 🚀 启动 claude-driver PTY...');
+
+    driver.ptyProc = pty.spawn(CLAUDE_CMD, CLAUDE_ARGS, {
+      name: 'xterm-color',
+      cols: PTY_COLS,
+      rows: PTY_ROWS,
+      cwd: process.cwd(),
+      env: { ...process.env, TERM: 'xterm-256color' }
     });
 
-    this._agentProcess = proc;
-    proc.stdin.end();
-
-    let stdoutBuffer = '';
-    let fullRawStdout = '';
-    let stderr = '';
-    let extractedText = '';
-    let extractedSessionId = null;
-
-    proc.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      fullRawStdout += text;
-      stdoutBuffer += text;
-
-      let newlineIndex;
-      while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
-        const line = stdoutBuffer.slice(0, newlineIndex).trim();
-        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-        if (!line) continue;
-
-        try {
-          const event = JSON.parse(line);
-          if (event.session_id && !extractedSessionId) extractedSessionId = event.session_id;
-
-          // 转发原始事件片段给中继 (用于 SSE 实时流)
-          this._send({ type: 'agent_stream', requestId, event });
-
-          // 提取文本
-          if (event.type === 'assistant' && event.message?.content) {
-            const parts = Array.isArray(event.message.content) ? event.message.content : [event.message.content];
-            for (const part of parts) {
-              if (typeof part === 'string') extractedText += part;
-              else if (part.type === 'text' && part.text) extractedText += part.text;
-            }
-          }
-          if (event.type === 'result' && event.result && !extractedText) extractedText = event.result;
-        } catch (e) {}
+    driver.ptyProc.onExit(({ exitCode }) => {
+      console.log(`[Agent] PTY 退出 (code: ${exitCode})`);
+      if (this._agentDriver === driver) {
+        this._agentDriver = null;
+        // 如果有等待中的任务，报错
+        if (driver.taskRejectFn) {
+          driver.taskRejectFn(new Error('Claude PTY 意外退出'));
+          driver.taskResolveFn = null;
+          driver.taskRejectFn = null;
+        }
       }
     });
 
-    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    driver.ptyProc.onData((raw) => {
+      driver.canvas.write(raw);
 
-    proc.on('close', (code) => {
-      console.log(`[Agent] ✅ 进程结束 (code: ${code})`);
-      this._agentProcess = null;
-      this._send({
-        type: 'agent_result',
-        requestId,
-        reply: extractedText.trim() || fullRawStdout || stderr || '(执行完成，无输出)',
-        exitCode: code || 0,
-        sessionId: extractedSessionId
-      });
+      // WAITING_FOR_BUSY 阶段：检测 esc to interrupt
+      if (driver.state === 'WAITING_FOR_BUSY') {
+        const visualText = driver.canvas.getVisualText();
+        if (ClaudeOutputParser.isBusy(visualText)) {
+          driver.state = 'BUSY';
+          console.log('[Agent] 侦测到 BUSY 状态');
+          // 转发进度事件给 SSE
+          this._send({ type: 'agent_stream', event: { type: 'status', state: 'busy' } });
+        }
+      }
+
+      // 防抖
+      clearTimeout(driver.idleTimer);
+      const dtime = driver.state === 'STARTING' ? STARTING_DEBOUNCE_MS : IDLE_DEBOUNCE_MS;
+      driver.idleTimer = setTimeout(() => this._onAgentIdleDetected(driver), dtime);
     });
 
-    proc.on('error', (err) => {
-      this._agentProcess = null;
-      this._send({
-        type: 'agent_result',
-        requestId,
-        reply: `[ERROR] 启动失败: ${err.message}`,
-        exitCode: -1
-      });
-    });
+    this._agentDriver = driver;
+    console.log('[Agent] ✅ claude-driver PTY 已启动，等待 IDLE...');
   }
 
-  // 中断当前 Agent 进程
-  _handleAgentAbort() {
-    if (this._agentProcess) {
-      console.log('[Agent] 🛑 中断执行');
-      try { this._agentProcess.kill(); } catch (e) {}
-      this._agentProcess = null;
+  // 空闲检测回调
+  _onAgentIdleDetected(driver) {
+    if (this._agentDriver !== driver) return;
+    const visualText = driver.canvas.getVisualText();
+
+    // 权限请求检测（仅在执行中）— 返回给 OpenClaw 决策，不自动放行
+    if ((driver.state === 'BUSY' || driver.state === 'WAITING_FOR_BUSY') &&
+        ClaudeOutputParser.isPermissionRequest(visualText)) {
+      if (driver.state === '_PERMISSION') return;
+      driver.state = '_PERMISSION';
+
+      // 提取权限提示文本
+      const rawLines = visualText.split('\n');
+      const cleanLines = rawLines.filter(line => {
+        const t = line.trim();
+        if (!t) return false;
+        if ((t.match(/[─╌━]/g) || []).length > 10) return false;
+        if (/^[▘▝▖▗⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✻◐◑◒◓·]+/.test(t)) return false;
+        if (t === '❯') return false;
+        return true;
+      }).slice(-10);
+      const prompt = cleanLines.join('\n');
+
+      console.log(`[Agent] ⚠️ 检测到权限请求，等待 OpenClaw 决策...`);
+
+      // 返回 permission_request 给 relay-server → OpenClaw
+      this._send({
+        type: 'agent_result',
+        requestId: driver.currentRequestId,
+        status: 'permission_request',
+        prompt
+      });
+      return;
+    }
+
+    if (driver.state === 'STARTING') {
+      driver.state = 'IDLE';
+      console.log('[Agent] ✅ Claude 已就绪 (IDLE)');
+      return;
+    }
+
+    if (driver.state === 'BUSY') {
+      if (ClaudeOutputParser.isDone(visualText)) {
+        driver.state = 'IDLE';
+        const replyText = ClaudeOutputParser.extractResponse(visualText);
+        console.log(`[Agent] 📦 任务完成，回复 ${replyText.length} 字符`);
+
+        if (driver.taskResolveFn) {
+          clearTimeout(driver.taskTimer);
+          const fn = driver.taskResolveFn;
+          driver.taskResolveFn = null;
+          driver.taskRejectFn = null;
+          fn(replyText);
+        }
+      }
+    }
+  }
+
+  // 处理来自中继的 Agent 任务（PTY 模式）
+  _handleAgentQuery(msg) {
+    const { requestId, message } = msg;
+    const driver = this._agentDriver;
+
+    if (!driver || !driver.ptyProc) {
+      this._send({
+        type: 'agent_result',
+        requestId,
+        reply: '[ERROR] claude-driver 未启动，请先调用 agent_start'
+      });
+      return;
+    }
+
+    if (driver.state !== 'IDLE') {
+      this._send({
+        type: 'agent_result',
+        requestId,
+        reply: `[ERROR] claude-driver 不在空闲状态，当前: ${driver.state}`
+      });
+      return;
+    }
+
+    console.log(`[Agent] 📤 发送消息: ${message.substring(0, 80)}...`);
+
+    // 重置画布，准备新一轮
+    driver.canvas = new ClaudeTerminalCanvas(220, 3000);
+    driver.state = 'WAITING_FOR_BUSY';
+    driver.currentRequestId = requestId;
+
+    // 设置超时
+    driver.taskTimer = setTimeout(() => {
+      driver.taskResolveFn = null;
+      driver.taskRejectFn = null;
+      driver.state = 'IDLE';
+      this._send({
+        type: 'agent_result',
+        requestId,
+        reply: '[ERROR] 执行超时 (600s)'
+      });
+    }, 600000);
+
+    // 设置回调
+    driver.taskResolveFn = (replyText) => {
+      this._send({
+        type: 'agent_result',
+        requestId,
+        reply: replyText
+      });
+    };
+    driver.taskRejectFn = (err) => {
+      this._send({
+        type: 'agent_result',
+        requestId,
+        reply: `[ERROR] ${err.message}`
+      });
+    };
+
+    // 写入消息到 PTY
+    driver.ptyProc.write(message + '\r');
+  }
+
+  // 处理 OpenClaw 的权限决策
+  _handleAgentPermission(msg) {
+    const driver = this._agentDriver;
+    if (!driver || driver.state !== '_PERMISSION') {
+      console.log('[Agent] ⚠️ 收到 permission 但状态不匹配，忽略');
+      return;
+    }
+
+    if (msg.allow) {
+      console.log('[Agent] ✅ OpenClaw 批准权限，发送回车确认');
+      driver.state = 'BUSY';
+      driver.canvas = new ClaudeTerminalCanvas(220, 3000);
+      driver.ptyProc.write('\r');
+    } else {
+      console.log('[Agent] ❌ OpenClaw 拒绝权限，发送 Escape 取消');
+      driver.state = 'BUSY';
+      driver.canvas = new ClaudeTerminalCanvas(220, 3000);
+      driver.ptyProc.write('\x1b');  // Escape 键
+    }
+  }
+
+  // 停止 claude-driver PTY
+  _handleAgentStop() {
+    if (this._agentDriver) {
+      console.log('[Agent] 🛑 停止 claude-driver PTY');
+      clearTimeout(this._agentDriver.idleTimer);
+      clearTimeout(this._agentDriver.taskTimer);
+      try { this._agentDriver.ptyProc.kill(); } catch {}
+      this._agentDriver = null;
     }
   }
 
@@ -251,7 +392,7 @@ class RelayClient extends EventEmitter {
   // 销毁连接
   destroy() {
     this._destroyed = true;
-    this._handleAgentAbort();
+    this._handleAgentStop();
     clearTimeout(this.reconnectTimer);
     if (this.ws) this.ws.close();
 

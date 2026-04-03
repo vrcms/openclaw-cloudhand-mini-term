@@ -761,7 +761,9 @@
 
     async function fetchAgentHistory() {
       try {
-        const res = await fetch('/agent/history');
+        const urlToken = new URLSearchParams(window.location.search).get('token');
+        const token = urlToken || document.cookie.match(/token=([^;]+)/)?.[1] || '';
+        const res = await fetch('/agent/history?token=' + encodeURIComponent(token));
         if (!res.ok) return;
         const data = await res.json();
 

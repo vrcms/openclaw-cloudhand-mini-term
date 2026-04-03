@@ -4,7 +4,8 @@
 // 核心职责：
 // 1. WebSocket 中继：连接本地终端与 Web UI 页面。
 // 2. Token 注册：基于本地持久化 Token 自动注册/识别机器。
-// 3. Agent 转发：将 AI 对话请求转发给本地机器执行 Claude CLI。
+// 3. Agent 转发：将 AI 对话请求转发给本地 claude-driver（PTY 模式）执行。
+//    relay-server 不直接执行 Claude，所有执行都在用户本地电脑上完成。
 // ============================================================================
 
 const http = require('http');
@@ -122,13 +123,23 @@ const server = http.createServer((req, res) => {
 
   // ==================== Agent API 路由 ====================
 
-  // 所有 /agent/* 路由仅限本地访问
+  // 仅限本地访问驱动指令功能 (POST)
+  // GET 请求 (status, history, stream) 允许 Web UI 远程查阅，但必须校验 token
   if (req.url.startsWith('/agent/')) {
-    if (!isLocalRequest(req)) {
-      return jsonResponse(res, 403, { error: 'Forbidden', message: 'Local access only' });
+    const cookies = parseCookies(req);
+    const reqToken = urlObj.query.token || cookies.token;
+
+    if (req.method === 'POST') {
+      if (!isLocalRequest(req)) {
+        return jsonResponse(res, 403, { error: 'Forbidden', message: 'Local access only for Agent control' });
+      }
+    } else if (req.method === 'GET') {
+      if (!reqToken || !isTokenKnown(reqToken)) {
+        return jsonResponse(res, 401, { error: 'Unauthorized', message: 'Invalid or missing token' });
+      }
     }
 
-    // POST /agent/start — 初始化 Agent 会话
+    // POST /agent/start — 初始化 Agent 会话（通知本地启动 claude-driver PTY）
     if (req.method === 'POST' && req.url === '/agent/start') {
       readBody(req, (body) => {
         try {
@@ -143,14 +154,16 @@ const server = http.createServer((req, res) => {
             return jsonResponse(res, 400, { ok: false, error: 'Agent 已在运行，请先 stop' });
           }
           agent.token = data.token;
-          agent.cwd = data.cwd || null;
-          agent.allowedTools = data.allowedTools || ['Read', 'Edit', 'Bash', 'Write'];
           agent.state = 'idle';
-          agent.sessionId = null;
           agent.history = [];
           agent.totalTurns = 0;
           agent.pendingRequest = null;
-          console.log(`[Agent] ✅ 已初始化目标机器: ${data.token}`);
+
+          // 通知本地启动 claude-driver（PTY 模式）
+          const termWs = terminalClients.get(data.token);
+          termWs.send(JSON.stringify({ type: 'agent_start' }));
+
+          console.log(`[Agent] ✅ 已初始化，目标机器: ${data.token}`);
           jsonResponse(res, 200, { ok: true, state: 'idle', targetToken: agent.token });
         } catch (e) {
           jsonResponse(res, 400, { ok: false, error: '请求体 JSON 解析失败' });
@@ -159,9 +172,9 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    // POST /agent/send — 发送消息并等待 Claude 回复 (通过转发给本地)
+    // POST /agent/send — 发送消息，转发给本地 claude-driver 执行
     if (req.method === 'POST' && req.url === '/agent/send') {
-      readBody(req, async (body) => {
+      readBody(req, (body) => {
         try {
           const data = JSON.parse(body);
           const message = data.message;
@@ -173,6 +186,9 @@ const server = http.createServer((req, res) => {
           }
           if (agent.state === 'busy') {
             return jsonResponse(res, 429, { ok: false, error: 'Agent 正忙，请等待上一轮完成' });
+          }
+          if (agent.state === 'waiting_permission') {
+            return jsonResponse(res, 409, { ok: false, error: 'Agent 正在等待权限决策，请先调用 /agent/permission' });
           }
 
           const termWs = terminalClients.get(agent.token);
@@ -186,30 +202,25 @@ const server = http.createServer((req, res) => {
           agent.state = 'busy';
           emitToStreamClients({ type: 'status', state: 'busy' });
 
-          // 发送指令给本地
+          // 转发给本地 claude-driver（PTY 模式），只传 message
           termWs.send(JSON.stringify({
             type: 'agent_query',
             requestId,
-            message,
-            sessionId: agent.sessionId,
-            allowedTools: agent.allowedTools,
-            cwd: agent.cwd
+            message
           }));
 
-          // 创建 Promise 并存储 res 以便回调
-          new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              if (agent.pendingRequest?.requestId === requestId) {
-                const savedRes = agent.pendingRequest.res;
-                agent.pendingRequest = null;
-                agent.state = 'idle';
-                jsonResponse(savedRes, 504, { ok: false, error: '本地执行超时 (180s)' });
-              }
-            }, 180000);
+          // PTY 模式下 Claude 可能执行较长时间，超时 600s
+          const timeout = setTimeout(() => {
+            if (agent.pendingRequest?.requestId === requestId) {
+              const savedRes = agent.pendingRequest.res;
+              agent.pendingRequest = null;
+              agent.state = 'idle';
+              emitToStreamClients({ type: 'status', state: 'idle' });
+              jsonResponse(savedRes, 504, { ok: false, error: '本地执行超时 (600s)' });
+            }
+          }, 600000);
 
-            agent.pendingRequest = { requestId, res, timeout };
-          });
-          // 注意：此处不再 resolve，由 Webhook 触发
+          agent.pendingRequest = { requestId, res, timeout };
         } catch (e) {
           jsonResponse(res, 400, { ok: false, error: '请求体 JSON 解析失败' });
         }
@@ -219,11 +230,10 @@ const server = http.createServer((req, res) => {
 
     // GET /agent/status — 查询状态
     if (req.method === 'GET' && req.url === '/agent/status') {
+      const isOwner = agent.token === reqToken;
       jsonResponse(res, 200, {
-        state: agent.state,
-        sessionId: agent.sessionId,
-        cwd: agent.cwd,
-        totalTurns: agent.totalTurns
+        state: isOwner ? agent.state : 'offline',
+        totalTurns: isOwner ? agent.totalTurns : 0
       });
       return;
     }
@@ -236,7 +246,11 @@ const server = http.createServer((req, res) => {
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no'
       });
-      res.write(`data: ${JSON.stringify({ type: 'status', state: agent.state, sessionId: agent.sessionId })}\n\n`);
+      const stateToEmit = (agent.token === reqToken) ? agent.state : 'offline';
+      res.write(`data: ${JSON.stringify({ type: 'status', state: stateToEmit })}\n\n`);
+      
+      // 注意：目前 streamClients 是全局 Set，实际应做到 per-token 或在发流时检查所有者的 res。
+      // 为保持简单，暂时存入，广播时只发给对应的（目前 emitToStreamClients 不区分 token）。
       agent.streamClients.add(res);
       req.on('close', () => {
         agent.streamClients.delete(res);
@@ -246,25 +260,75 @@ const server = http.createServer((req, res) => {
 
     // GET /agent/history — 获取对话历史
     if (req.method === 'GET' && (req.url === '/agent/history' || req.url.startsWith('/agent/history?'))) {
+      const isOwner = agent.token === reqToken;
       jsonResponse(res, 200, {
         ok: true,
-        history: agent.history,
-        state: agent.state,
-        sessionId: agent.sessionId
+        history: isOwner ? agent.history : [],
+        state: isOwner ? agent.state : 'offline'
       });
       return;
     }
 
-    // POST /agent/stop — 关闭会话
+    // POST /agent/permission — OpenClaw 发送权限决策
+    if (req.method === 'POST' && req.url === '/agent/permission') {
+      readBody(req, (body) => {
+        try {
+          const data = JSON.parse(body);
+          if (agent.state !== 'waiting_permission') {
+            return jsonResponse(res, 400, { ok: false, error: 'Agent 未在等待权限状态' });
+          }
+          const termWs = terminalClients.get(agent.token);
+          if (!termWs || termWs.readyState !== 1) {
+            agent.state = 'offline';
+            return jsonResponse(res, 503, { ok: false, error: '目标机器已离线' });
+          }
+
+          // 转发权限决策给本地
+          termWs.send(JSON.stringify({
+            type: 'agent_permission',
+            allow: !!data.allow
+          }));
+
+          agent.state = 'busy';
+          emitToStreamClients({ type: 'status', state: 'busy' });
+
+          // 设置新的 pending request，等待权限处理后的结果
+          const requestId = agent.lastRequestId;
+          const timeout = setTimeout(() => {
+            if (agent.pendingRequest?.requestId === requestId) {
+              const savedRes = agent.pendingRequest.res;
+              agent.pendingRequest = null;
+              agent.state = 'idle';
+              emitToStreamClients({ type: 'status', state: 'idle' });
+              jsonResponse(savedRes, 504, { ok: false, error: '权限放行后执行超时 (600s)' });
+            }
+          }, 600000);
+
+          agent.pendingRequest = { requestId, res, timeout };
+          // 注意：这里不回复 HTTP，等待下一个 agent_result 回调
+        } catch (e) {
+          jsonResponse(res, 400, { ok: false, error: 'JSON 解析失败' });
+        }
+      });
+      return;
+    }
+
+    // POST /agent/stop — 关闭会话，通知本地停止 claude-driver
     if (req.method === 'POST' && req.url === '/agent/stop') {
-      if (agent.state === 'busy') {
-        const termWs = terminalClients.get(agent.token);
-        if (termWs) termWs.send(JSON.stringify({ type: 'agent_abort' }));
+      // 如果有等待中的请求，先回复超时
+      if (agent.pendingRequest) {
+        clearTimeout(agent.pendingRequest.timeout);
+        try { jsonResponse(agent.pendingRequest.res, 499, { ok: false, error: 'Agent 被手动停止' }); } catch {}
+        agent.pendingRequest = null;
+      }
+      // 通知本地停止 claude-driver PTY
+      const termWs = terminalClients.get(agent.token);
+      if (termWs && termWs.readyState === WebSocket.OPEN) {
+        termWs.send(JSON.stringify({ type: 'agent_stop' }));
       }
       agent.state = 'offline';
       agent.token = null;
-      agent.pendingRequest = null;
-      console.log('[Agent] 🛑 已停止 Agent 会话');
+      console.log('[Agent] 🛑 已停止');
       jsonResponse(res, 200, { ok: true, state: 'offline' });
       return;
     }
@@ -358,17 +422,54 @@ function handleTerminalConnection(ws) {
     if (msg.type === 'agent_stream') {
       emitToStreamClients(msg.event);
     }
+    // claude-driver 回传结果（区分完成/权限请求）
     if (msg.type === 'agent_result') {
+      // 权限请求 — 返回给 OpenClaw 决策
+      if (msg.status === 'permission_request') {
+        if (agent.pendingRequest) {
+          clearTimeout(agent.pendingRequest.timeout);
+          const savedRes = agent.pendingRequest.res;
+          agent.pendingRequest = null;
+          agent.state = 'waiting_permission';
+          agent.lastRequestId = msg.requestId;
+          emitToStreamClients({ type: 'permission_request', prompt: msg.prompt });
+          jsonResponse(savedRes, 200, {
+            ok: true,
+            needsPermission: true,
+            prompt: msg.prompt
+          });
+        }
+        return;
+      }
+
+      // 正常完成
       if (agent.pendingRequest && agent.pendingRequest.requestId === msg.requestId) {
         clearTimeout(agent.pendingRequest.timeout);
         const savedRes = agent.pendingRequest.res;
         agent.pendingRequest = null;
         agent.state = 'idle';
-        agent.sessionId = msg.sessionId || agent.sessionId;
-        agent.totalTurns++;
-        agent.history.push({ role: 'claude', message: msg.reply, exitCode: msg.exitCode, timestamp: Date.now() });
+
+        // 区分错误回复和正常回复，错误不计入 history
+        const isError = msg.reply && msg.reply.startsWith('[ERROR]');
+        if (!isError) {
+          agent.totalTurns++;
+          agent.history.push({ 
+            role: 'claude', 
+            message: msg.reply,
+            timestamp: Date.now() 
+          });
+        } else {
+          // 错误回复时也移除对应的 openclaw 消息（避免重试污染 history）
+          if (agent.history.length > 0 && agent.history[agent.history.length - 1].role === 'openclaw') {
+            agent.history.pop();
+          }
+        }
+
         emitToStreamClients({ type: 'status', state: 'idle' });
-        jsonResponse(savedRes, 200, { ok: msg.exitCode === 0, reply: msg.reply, sessionId: msg.sessionId, exitCode: msg.exitCode });
+        jsonResponse(savedRes, 200, { 
+          ok: !isError, 
+          reply: msg.reply
+        });
       }
     }
   });
@@ -379,6 +480,18 @@ function handleTerminalConnection(ws) {
       terminalClients.delete(clientToken);
       broadcastToUIByToken(clientToken, { type: 'terminal_disconnected' });
       console.log(`[中继] ❌ 终端已断开: ${clientToken}`);
+
+      // 如果 agent 关联该 token，重置状态
+      if (agent.token === clientToken) {
+        if (agent.pendingRequest) {
+          clearTimeout(agent.pendingRequest.timeout);
+          try { jsonResponse(agent.pendingRequest.res, 503, { ok: false, error: '目标机器已断开' }); } catch {}
+          agent.pendingRequest = null;
+        }
+        agent.state = 'offline';
+        agent.token = null;
+        console.log('[Agent] ⚠️ 目标机器断开，Agent 已重置');
+      }
     }
   });
 }
@@ -450,15 +563,13 @@ function isLocalRequest(req) {
 // ==================== Agent 状态 ====================
 
 const agent = {
-  state: 'offline',
-  token: null,
-  sessionId: null,
-  cwd: null,
-  allowedTools: [],
-  history: [],
-  totalTurns: 0,
-  pendingRequest: null,
-  streamClients: new Set()
+  state: 'offline',    // offline | idle | busy | waiting_permission
+  token: null,         // 目标机器 token
+  history: [],         // AI-to-AI 对话历史
+  totalTurns: 0,       // 累计对话轮次
+  pendingRequest: null, // 等待中的 HTTP 请求 { requestId, res, timeout }
+  lastRequestId: null, // 最后一个 requestId（用于权限流程）
+  streamClients: new Set() // SSE 客户端
 };
 
 function generateRequestId() {
