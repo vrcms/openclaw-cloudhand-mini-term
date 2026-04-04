@@ -78,6 +78,14 @@ class RelayClient extends EventEmitter {
           this.emit('authenticated', { computerName: msg.computer_name });
           console.log('[中继客户端] ✅ 认证成功！');
           
+          // --- Effort 2.0: 状态自叙 (State Handshake) ---
+          // 重连成功后，第一时间告诉中继我正在干嘛
+          this._send({
+            type: 'agent_sync',
+            state: this._agentDriver ? this._agentDriver.state : 'offline',
+            requestId: this._agentDriver ? this._agentDriver.currentRequestId : null
+          });
+
           // 认证成功后立即补发所有推迟的消息（补课模式）
           this._flushSendQueue();
         } else if (msg.type === 'auth_fail') {

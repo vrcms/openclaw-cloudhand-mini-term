@@ -416,6 +416,8 @@ function handleTerminalConnection(ws) {
 
         const info = clientRegistry.get(token);
         ws.send(JSON.stringify({ type: 'auth_ok', computer_name: info.computer_name }));
+        // 同步当前状态
+        ws.send(JSON.stringify({ type: 'agent_sync', state: agent.state, requestId: agent.lastRequestId }));
         broadcastToUIByToken(token, { type: 'terminal_connected', computer_name: info.computer_name });
         console.log(`[中继] ✅ 终端已连接: "${info.computer_name}"`);
       }
@@ -451,34 +453,41 @@ function handleTerminalConnection(ws) {
       }
 
       // 正常完成
+      // --- Effort 2.0: 结果落袋为安 ---
+      // 无论此时是否有 HTTP 连接 (pendingRequest) 在等，只要出结果了就记入 history
+      const isError = msg.reply && msg.reply.startsWith('[ERROR]');
+      if (!isError) {
+        agent.totalTurns++;
+        agent.history.push({ 
+          role: 'claude', 
+          message: msg.reply,
+          timestamp: Date.now() 
+        });
+      } else {
+        if (agent.history.length > 0 && agent.history[agent.history.length - 1].role === 'openclaw') {
+          agent.history.pop();
+        }
+      }
+      
+      agent.state = 'idle';
+      emitToStreamClients({ type: 'status', state: 'idle' });
+
+      // 如果有 HTTP 连接在等结果，才进行回复
       if (agent.pendingRequest && agent.pendingRequest.requestId === msg.requestId) {
         clearTimeout(agent.pendingRequest.timeout);
         const savedRes = agent.pendingRequest.res;
         agent.pendingRequest = null;
-        agent.state = 'idle';
-
-        // 区分错误回复和正常回复，错误不计入 history
-        const isError = msg.reply && msg.reply.startsWith('[ERROR]');
-        if (!isError) {
-          agent.totalTurns++;
-          agent.history.push({ 
-            role: 'claude', 
-            message: msg.reply,
-            timestamp: Date.now() 
-          });
-        } else {
-          // 错误回复时也移除对应的 openclaw 消息（避免重试污染 history）
-          if (agent.history.length > 0 && agent.history[agent.history.length - 1].role === 'openclaw') {
-            agent.history.pop();
-          }
-        }
-
-        emitToStreamClients({ type: 'status', state: 'idle' });
-        jsonResponse(savedRes, 200, { 
-          ok: !isError, 
-          reply: msg.reply
-        });
+        jsonResponse(savedRes, 200, { ok: !isError, reply: msg.reply });
       }
+      return;
+    }
+
+    // --- Effort 2.0: 状态自叙同步 ---
+    if (msg.type === 'agent_sync') {
+      console.log(`[Agent] 🔄 收到状态对齐信号 (State Handshake): ${msg.state}, requestId: ${msg.requestId}`);
+      agent.state = msg.state;
+      if (msg.requestId) agent.lastRequestId = msg.requestId;
+      emitToStreamClients({ type: 'status', state: msg.state });
     }
   });
 
