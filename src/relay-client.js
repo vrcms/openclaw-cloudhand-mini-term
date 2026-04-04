@@ -33,6 +33,9 @@ class RelayClient extends EventEmitter {
     this.sessionManager.on('created', this._onCreated);
     this.sessionManager.on('closed', this._onClosed);
     this.sessionManager.on('exit', this._onExit);
+    
+    // 离线消息缓冲队列 (Message Backlog Queue)
+    this._sendQueue = [];
   }
 
   // 连接到中继服务器
@@ -74,6 +77,9 @@ class RelayClient extends EventEmitter {
           this.authenticated = true;
           this.emit('authenticated', { computerName: msg.computer_name });
           console.log('[中继客户端] ✅ 认证成功！');
+          
+          // 认证成功后立即补发所有推迟的消息（补课模式）
+          this._flushSendQueue();
         } else if (msg.type === 'auth_fail') {
           console.error(`[中继客户端] ❌ 认证失败: ${msg.reason}`);
           this.emit('auth_failed', { reason: msg.reason });
@@ -388,10 +394,26 @@ class RelayClient extends EventEmitter {
     }
   }
 
-  // 发送消息到中继
+  // 发送消息到中继（包含离线缓冲逻辑）
   _send(data) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated) {
       this.ws.send(JSON.stringify(data));
+    } else {
+      // 只有在认证成功之前（初次连接）或连接断开后才入队
+      // 但对于认证前的消息（除 auth 外），一般不需要队列处理，除非是来自 PTY 的突发数据
+      this._sendQueue.push(data);
+      if (this._sendQueue.length > 5000) this._sendQueue.shift(); // 防止溢出，保留最近 5000 条
+    }
+  }
+
+  // 补发队列中的所有积压消息
+  _flushSendQueue() {
+    if (this._sendQueue.length > 0) {
+      console.log(`[中继客户端] 🔄 正在补齐网络断线期间的 ${this._sendQueue.length} 条积压消息...`);
+      while (this._sendQueue.length > 0 && this.ws.readyState === WebSocket.OPEN) {
+        const item = this._sendQueue.shift();
+        this.ws.send(JSON.stringify(item));
+      }
     }
   }
 
