@@ -168,6 +168,28 @@ curl -N "http://localhost:<端口>/agent/stream?token=<机器TOKEN>"
 curl -X POST http://127.0.0.1:<端口>/agent/stop
 ```
 
+## 子智能体派发协议 (Sub-agent Dispatch Protocol)
+
+为应对耗时较长的重构、部署或测试任务，调用方 AI（OpenClaw）应采用 **Worker Agent 模式**：
+
+### 1. 角色解耦 (Leader-Follower)
+- **OpenClaw (Leader)**：负责任务分解、全局规划和向用户汇报。
+- **本地 Claude (Follower/Worker)**：负责具体代码编写、命令行执行和细节实现。
+
+### 2. 异步派发与非阻塞执行 (Asynchronous Task)
+- **任务剥离**：当预判任务耗时较长（如 > 30s），OpenClaw 在发送完 `/agent/send` 后，可以告知用户：“任务已派发给本地子智能体，正在后台处理，您可以继续向我提问，我将稍后为您检查进度。”
+- **思维槽释放**：主 Agent 不需要等待 HTTP 阻塞，可以暂时结束当前对话轮次，释放计算资源。
+
+### 3. 定期巡检与断点回溯 (Check-in & Resume)
+- **状态探测**：在后续对话中，主 Agent 应定期通过 `GET /agent/status` 轮询子 Agent 是否回到 `idle` 状态。
+- **上下文衔接**：由于本地 PTY 具有持久性，主 Agent 在任务完成后重新调用 `GET /agent/history` 即可拉取子 Agent 的所有执行细节。
+
+### 4. 审核与最后裁决 (Review & Decide)
+- **质量把关**：主 Agent 重回会话后，**必须**先根据本协议的《协作与验收规范》进行质量核验。
+- **向人汇报**：确认无误后，向人类（东哥）展示成果摘要，并询问后续指示。
+
+---
+
 ## AI-to-AI 协作与验收规范 (Collaboration Protocol)
 
 为确保远程智能体之间高效、可靠地完成任务，必须遵循以下协作准则：
