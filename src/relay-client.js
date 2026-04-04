@@ -170,7 +170,7 @@ class RelayClient extends EventEmitter {
     const PTY_COLS = 220;
     const PTY_ROWS = 3000;
     const IDLE_DEBOUNCE_MS = 1500;
-    const STARTING_DEBOUNCE_MS = 6000;
+    const STARTING_DEBOUNCE_MS = 60000;
 
     const driver = {
       ptyProc: null,
@@ -268,6 +268,8 @@ class RelayClient extends EventEmitter {
     if (driver.state === 'STARTING') {
       driver.state = 'IDLE';
       console.log('[Agent] ✅ Claude 已就绪 (IDLE)');
+      // 将冷启动完成的就绪状态同步给中继，让 OpenClaw 的 SSE 感知到
+      this._send({ type: 'agent_stream', event: { type: 'status', state: 'idle' } });
       return;
     }
 

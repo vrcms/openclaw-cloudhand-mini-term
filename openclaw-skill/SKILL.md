@@ -82,6 +82,21 @@ node openclaw-skill/relay-server.js --port <端口> &
 
 启动后，Web UI 可以通过 `http://<服务器IP>:<端口>` 访问。本地端连接后，会在中继注册。
 
+## 状态感知与异步就绪 (State Awareness)
+
+由于 Claude CLI 属于重量级应用，**冷启动 (First Start) 可能需要 30-60 秒**。作为调用方 AI，你必须学会“异步等待”：
+
+### 1. 监听就绪流 (SSE)
+在执行 `POST /agent/start` 后，建立 `GET /agent/stream` 连接并监听：
+- **等待信号**：直到收到 `{"type": "status", "state": "idle"}`，才代表 PTY 已加载完毕。
+- **过程中信号**：你可能会收到 `{"type": "status", "state": "busy"}`，说明它正在努力加载中。
+
+### 2. 本动查询 (Polling)
+如果无法建立长连接，请轮询 `GET /agent/status`：
+- **状态切换**：只有当 `state` 从 `starting` 变为 `idle` 时，才可发送第一条指令。
+
+---
+
 ## 第二步：获取在线机器
 
 ```bash
@@ -179,6 +194,8 @@ curl -X POST http://127.0.0.1:<端口>/agent/stop
    - **状态停留**：完成一轮 `send` 后，必须保持在 `idle` 状态，等待下一轮指令。
 
 2. **Windows PTY 限制**：本地端在 Windows 上使用 `node-pty` 时必须通过 `cmd.exe /c claude` 发起，客户端代码已做系统适配。
-3. **长超时**：AI-to-AI 自动执行包含编译、安装等耗时操作，客户端和中继服务器均支持 600s 的长请求生命周期。
+3. **长超时与冷启动 (Cold Start)**：
+   - AI-to-AI 自动执行包含编译、安装等耗时操作，客户端和中继服务器均支持 600s 的长请求生命周期。
+   - **冷启动窗口**：Claude 进程初始化在低配或高负载机器上可能长达 60s，脚本已适配 60s 的防抖时间，请 AI 在调用 `/agent/start` 后耐心等待 `idle` 信号。
 4. **Web UI 集成**：Agent 的历史记录会同步到 `ui.html` 右侧抽屉。
 5. **任务清理**：仅在用户明确表示任务彻底结束或需要从其他目录重启时，才调用 `/agent/stop` 释放资源。
