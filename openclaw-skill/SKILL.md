@@ -190,6 +190,29 @@ curl -X POST http://127.0.0.1:<端口>/agent/stop
 
 ---
 
+## 权限决策委托协议 (Permission Delegation Protocol)
+
+安全高于效率。任何涉及系统变更、软件安装或敏感数据访问的操作，必须遵循 **拦截-上报-委托** 流程：
+
+### 1. 自动拦截与挂起 (Interception)
+- **物理拦截**：本地 PTY 在探测到 `(y/n)`、`allow ...?` 或 `Agree?` 等授权申请时，**必须立即挂起**，由 `relay-client` 同步给中继服务器。
+- **严禁擅行**：本地子智能体即便自认为操作正确，也**绝对严禁**私自决定 `y` 或 `n`。
+
+### 2. 决策权上移 (Relay to OpenClaw)
+- **现场快照**：中继通过 `needsPermission: true` 和 `prompt` 字段，将现场真实的授权提示语推送给主 Agent（OpenClaw）。
+- **状态冻结**：此期间 Agent 状态锁死在 `waiting_permission`，直到收到 `/agent/permission`。
+
+### 3. 结果决策与代理判断
+- **风险评估**：主 Agent 必须根据当前的任务上下文（如：是否刚才确实要求过安装此模块）进行风险评估。
+- **两级审批**：
+    - **逻辑内决策**：确属任务必须且低风险（如安装 npm 包），由主 Agent 代为授权 `allow: true`。
+    - **高危请示**：涉及删库、执行外链 Bash、写入系统配置，主 Agent **必须**将 `prompt` 原样展示给人类用户（东哥），手动等待确认。
+
+### 4. 交互式敏感输入 (Sensitive Input)
+- **通用拦截**：同理，当本地需要 API Key、账号、密码等交互式输入时，均视为一种“权限请求”，需回传给主 Agent 统一处理或索要。
+
+---
+
 ## AI-to-AI 协作与验收规范 (Collaboration Protocol)
 
 为确保远程智能体之间高效、可靠地完成任务，必须遵循以下协作准则：
