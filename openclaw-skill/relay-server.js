@@ -406,6 +406,14 @@ function handleTerminalConnection(ws) {
         clientToken = token;
         upsertClient(token, computerName);
         terminalClients.set(token, ws);
+
+        // 如果是正在保留中的 Agent 机器重连，清除离线计时器
+        if (agent.token === token && agent.offlineTimer) {
+          console.log(`[Agent] 🔄 目标机器 "${computerName}" 已在保留期内回传，会话恢复。`);
+          clearTimeout(agent.offlineTimer);
+          agent.offlineTimer = null;
+        }
+
         const info = clientRegistry.get(token);
         ws.send(JSON.stringify({ type: 'auth_ok', computer_name: info.computer_name }));
         broadcastToUIByToken(token, { type: 'terminal_connected', computer_name: info.computer_name });
@@ -474,26 +482,31 @@ function handleTerminalConnection(ws) {
     }
   });
 
-  ws.on('close', () => {
-    clearTimeout(authTimeout);
-    if (clientToken && terminalClients.get(clientToken) === ws) {
-      terminalClients.delete(clientToken);
-      broadcastToUIByToken(clientToken, { type: 'terminal_disconnected' });
-      console.log(`[中继] ❌ 终端已断开: ${clientToken}`);
-
-      // 如果 agent 关联该 token，重置状态
-      if (agent.token === clientToken) {
-        if (agent.pendingRequest) {
-          clearTimeout(agent.pendingRequest.timeout);
-          try { jsonResponse(agent.pendingRequest.res, 503, { ok: false, error: '目标机器已断开' }); } catch {}
-          agent.pendingRequest = null;
+    ws.on('close', () => {
+      clearTimeout(authTimeout);
+      if (clientToken && terminalClients.get(clientToken) === ws) {
+        terminalClients.delete(clientToken);
+        broadcastToUIByToken(clientToken, { type: 'terminal_disconnected' });
+        console.log(`[中继] ❌ 终端已断开: ${clientToken}`);
+  
+        // 如果 agent 关联该 token，启动延迟重置计时器 (5分钟)
+        if (agent.token === clientToken) {
+          console.log(`[Agent] ⚠️ 目标机器断开，启动 5 分钟会话保留计时器...`);
+          agent.offlineTimer = setTimeout(() => {
+            if (agent.token === clientToken && !terminalClients.has(clientToken)) {
+              if (agent.pendingRequest) {
+                clearTimeout(agent.pendingRequest.timeout);
+                try { jsonResponse(agent.pendingRequest.res, 503, { ok: false, error: '目标机器已断开' }); } catch {}
+                agent.pendingRequest = null;
+              }
+              agent.state = 'offline';
+              agent.token = null;
+              console.log('[Agent] 🛑 5 分钟超时，Agent 已彻底重置');
+            }
+          }, 300000);
         }
-        agent.state = 'offline';
-        agent.token = null;
-        console.log('[Agent] ⚠️ 目标机器断开，Agent 已重置');
       }
-    }
-  });
+    });
 }
 
 // ---- 浏览器 UI 连接处理 ----
@@ -569,7 +582,8 @@ const agent = {
   totalTurns: 0,       // 累计对话轮次
   pendingRequest: null, // 等待中的 HTTP 请求 { requestId, res, timeout }
   lastRequestId: null, // 最后一个 requestId（用于权限流程）
-  streamClients: new Set() // SSE 客户端
+  streamClients: new Set(), // SSE 客户端
+  offlineTimer: null    // 离线保留计时器
 };
 
 function generateRequestId() {

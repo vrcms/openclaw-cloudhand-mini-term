@@ -156,9 +156,13 @@ class RelayClient extends EventEmitter {
 
   // 启动 claude-driver PTY
   _handleAgentStart() {
-    if (this._agentDriver) {
-      console.log('[Agent] ⚠️ driver 已存在，先销毁再重建');
-      this._handleAgentStop();
+    if (this._agentDriver && this._agentDriver.ptyProc) {
+      console.log('[Agent] 🔄 检测到已有运行中的 PTY，正在执行热衔接...');
+      // 检查当前状态，如果是 IDLE，立即同步给中继以确认可用性
+      if (this._agentDriver.state === 'IDLE') {
+        this._send({ type: 'agent_stream', event: { type: 'status', state: 'idle' } });
+      }
+      return;
     }
 
     // node-pty 在 Windows 上无法直接 spawn .cmd 文件，需通过 cmd.exe /c
